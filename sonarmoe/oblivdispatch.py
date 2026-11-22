@@ -10,6 +10,100 @@ import torch
 import torch.nn.functional as F
 
 from sonarmoe.models import MoEArchSpec, get_router_module
+from sonarmoe.theory import inverse_normal_cdf, zcdp_rho_for_eps_delta
+
+
+def compute_oblivdispatch_schedule(
+    spec: MoEArchSpec,
+    epsilon: float,
+    delta: float = 1e-5,
+    b_vic: int = 64,
+) -> dict[str, float | int]:
+    """Computes the exact, reproducible OblivDispatch parameter schedule for (spec, ε, δ).
+
+    Uses the sound shifted two-sided Gaussian mechanism with split failure probability
+    δ = δ_zCDP + δ_tail (δ/2 each) and data-independent clipping [N_min, N_max]:
+      1. Stage 2 caps every home expert at τ_cap > k * B_vic / E (guaranteeing 100%
+         real-token conservation inside the E slots with 0 <= c_{l,e} <= τ_cap).
+      2. Raw L-layer l2 sensitivity across neighboring B_vic-token queries is bounded by
+         Δ_{2,raw} = sqrt(2 * L * τ_cap * min(k * B_vic, E * τ_cap - k * B_vic)).
+      3. Stage 3 applies linear leveling (1 - α_ε) c_{l,e} + α_ε τ_cap + μ_shift + Z_{l,e},
+         where Z_{l,e} ~ N(0, σ_DP^2) is two-sided Gaussian noise with exact calibration
+         σ_DP = (1 - α_ε) * Δ_{2,raw} / sqrt(2 * ρ(ε, δ/2)), and
+         μ_shift = σ_DP * Φ^{-1}(1 - (δ/2) / (L * E)) absorbs the union-bound underflow
+         event {∃ (l,e): T_{l,e} < c_{l,e}} into δ_tail = δ/2.
+    """
+    prob_margin_gamma = spec.prob_margin_gamma
+    gumbel_scale = float(np.clip(0.0020 / math.sqrt(epsilon), 0.0006, 0.0032))
+
+    # Average routed tokens per expert per layer (OLMoE: 8.0, Granite: 16.0)
+    total_layer_assign = spec.top_k * b_vic
+    mean_per_expert = total_layer_assign / float(spec.num_experts)
+    base_cap = math.ceil(mean_per_expert)
+
+    if epsilon >= 8.0:
+        cap_tau = base_cap + 8
+        sigma_target = 2.0
+    elif epsilon >= 4.0:
+        cap_tau = base_cap + 5
+        sigma_target = 2.0
+    elif epsilon >= 2.0:
+        cap_tau = base_cap + 3
+        sigma_target = 1.8
+    elif epsilon >= 1.0:
+        cap_tau = base_cap + 2
+        sigma_target = 1.6
+    else:  # epsilon = 0.5
+        cap_tau = base_cap + 1
+        sigma_target = 1.5
+
+    delta_zcdp = 0.5 * delta
+    delta_tail = 0.5 * delta
+    rho_zcdp = zcdp_rho_for_eps_delta(epsilon, delta_zcdp)
+
+    # Exact L-layer query-level l2 sensitivity of Stage-2 counts c in [0, τ_cap]^{L x E}
+    l1_half_cap = min(total_layer_assign, spec.num_experts * cap_tau - total_layer_assign)
+    delta_2_raw = math.sqrt(2.0 * spec.num_layers * cap_tau * max(l1_half_cap, 0))
+
+    # Calibrate leveling factor α_ε so that Δ_2(ε) = (1 - α_ε) Δ_{2,raw} = σ_DP * sqrt(2ρ)
+    if delta_2_raw > 0.0:
+        one_minus_alpha = min(1.0, (sigma_target * math.sqrt(2.0 * rho_zcdp)) / delta_2_raw)
+        level_alpha = 1.0 - one_minus_alpha
+        delta_2_eff = one_minus_alpha * delta_2_raw
+        dp_sigma = delta_2_eff / math.sqrt(2.0 * rho_zcdp)
+    else:
+        level_alpha = 1.0
+        delta_2_eff = 0.0
+        dp_sigma = 0.0
+
+    # Union-bound tail shift μ_shift so Pr[∃(l,e): Round(U_{l,e}) < c_{l,e}] <= δ_tail
+    per_slot_tail = delta_tail / float(spec.num_layers * spec.num_experts)
+    z_tail = inverse_normal_cdf(1.0 - per_slot_tail)
+    mu_shift = dp_sigma * z_tail
+
+    # Data-independent clipping bounds [N_min, N_max] (N_min=1 closes kernel-skip channel)
+    n_min = 1
+    n_max = int(math.ceil(cap_tau + 2.0 * mu_shift + 2.0))
+
+    return {
+        "epsilon": float(epsilon),
+        "delta": float(delta),
+        "delta_zcdp": float(delta_zcdp),
+        "delta_tail": float(delta_tail),
+        "rho_zcdp_nats": round(rho_zcdp, 5),
+        "gumbel_scale": round(gumbel_scale, 5),
+        "prob_margin_gamma": prob_margin_gamma,
+        "shadow_cap_tau": int(cap_tau),
+        "level_alpha": round(level_alpha, 5),
+        "delta_2_raw": round(delta_2_raw, 3),
+        "delta_2_eff": round(delta_2_eff, 4),
+        "dp_sigma": round(dp_sigma, 4),
+        "z_tail_sigma": round(z_tail, 3),
+        "mu_shift": round(mu_shift, 3),
+        "n_min": int(n_min),
+        "n_max": int(n_max),
+        "idle_cover_prob": 1.0,
+    }
 
 
 def apply_oblivdispatch_defense(
@@ -18,53 +112,36 @@ def apply_oblivdispatch_defense(
     epsilon: float,
     delta: float,
     rng: np.random.Generator,
-) -> tuple[np.ndarray, dict[str, float]]:
-    """Applies OblivDispatch (ε, δ)-DP defense to victim routing & expert dispatch.
+) -> tuple[np.ndarray, dict[str, float | int]]:
+    """Applies sound per-tenant OblivDispatch (ε, δ)-DP defense to victim dispatch.
 
     Implements:
       1. Probability-Margin-Bounded Secondary Expert Gumbel Jitter (Δp <= γ_p)
-      2. Shadow-Expert Overflow Routing into non-straggler slack ("Straggler-Slack Hiding")
-      3. Constant-Occupancy Kernel-Skip Closure + (ε, δ)-DP Gaussian Count Blinding
+      2. Per-Tenant Shadow-Expert Overflow Routing into Victim A's own lightest local
+         slots (capped at τ_cap, preserving 100% of real tokens with zero cross-tenant
+         inspection of Attacker B's workload)
+      3. Sound Shifted Two-Sided Gaussian Count Blinding with Data-Independent Clipping
+         [N_min, N_max] and Split Failure Budget δ = δ_zCDP + δ_tail
     """
     num_q, num_l, b_tok, num_e = router_logits_all.shape
     defended_counts = np.zeros((num_q, num_l, num_e), dtype=np.int32)
 
-    prob_margin_gamma = spec.prob_margin_gamma
-    gumbel_scale = float(np.clip(0.0020 / math.sqrt(epsilon), 0.0006, 0.0032))
+    sched = compute_oblivdispatch_schedule(spec, epsilon=epsilon, delta=delta, b_vic=b_tok)
+    prob_margin_gamma = float(sched["prob_margin_gamma"])
+    gumbel_scale = float(sched["gumbel_scale"])
+    cap_tau = int(sched["shadow_cap_tau"])
+    level_alpha = float(sched["level_alpha"])
+    dp_sigma = float(sched["dp_sigma"])
+    mu_shift = float(sched["mu_shift"])
+    n_min = int(sched["n_min"])
+    n_max = int(sched["n_max"])
 
-    # Scale shadow cap proportionally to top_k (top_k=8 -> avg 8/expert; top_k=4 -> avg 4.27/expert)
-    scale_k = spec.top_k / 8.0
-    if epsilon >= 8.0:
-        cap_tau = max(6, round(15 * scale_k))
-        idle_cover_prob = 0.40
-        level_alpha = 0.30
-        dp_sigma = 1.8 * math.sqrt(scale_k)
-    elif epsilon >= 4.0:
-        cap_tau = max(5, round(11 * scale_k))
-        idle_cover_prob = 0.68
-        level_alpha = 0.58
-        dp_sigma = 3.2 * math.sqrt(scale_k)
-    elif epsilon >= 2.0:
-        cap_tau = max(4, round(8 * scale_k))
-        idle_cover_prob = 0.90
-        level_alpha = 0.82
-        dp_sigma = 4.8 * math.sqrt(scale_k)
-    elif epsilon >= 1.0:
-        cap_tau = max(4, round(7 * scale_k))
-        idle_cover_prob = 1.00
-        level_alpha = 0.96
-        dp_sigma = 6.2 * math.sqrt(scale_k)
-    else:  # epsilon = 0.5
-        cap_tau = max(3, round(6 * scale_k))
-        idle_cover_prob = 1.00
-        level_alpha = 1.00
-        dp_sigma = 7.2 * math.sqrt(scale_k)
-
-    max_pad_ceil = max(12, round(18 * scale_k))
     core_k = spec.top_k - 1
     total_real_tokens = float(num_q * num_l * b_tok * spec.top_k)
     total_shadow_redirected = 0.0
     total_dummy_padded = 0.0
+    total_slots = num_q * num_l * num_e
+    underflow_slots = 0
 
     for q_idx in range(num_q):
         for l_idx in range(num_l):
@@ -85,62 +162,55 @@ def apply_oblivdispatch_defense(
             sec1 = np.argmax(cand_scores, axis=-1, keepdims=True)
 
             chosen = np.concatenate([core_idx, sec1], axis=-1)
-            raw_counts = np.bincount(chosen.reshape(-1), minlength=num_e)
+            raw_counts = np.bincount(chosen.reshape(-1), minlength=num_e).astype(np.int32)
 
-            # 1. Shadow-Expert Overflow Routing into idle/light slots on partner ranks
+            # Stage 2: Per-Tenant Shadow-Expert Overflow into Victim A's own lightest slots
+            # Every slot is strictly capped at cap_tau, conserving 100% of real tokens.
             overflow = np.maximum(raw_counts - cap_tau, 0)
             work_counts = np.minimum(raw_counts, cap_tau)
             n_over = int(overflow.sum())
             total_shadow_redirected += n_over
 
             if n_over > 0:
-                idle_slots = np.where(work_counts == 0)[0]
-                num_sh = min(4, max(1, n_over // 10))
-                if len(idle_slots) >= num_sh:
-                    sh_targets = rng.choice(idle_slots, size=num_sh, replace=False)
-                else:
-                    light_slots = np.argsort(work_counts)[:8]
-                    sh_targets = rng.choice(light_slots, size=num_sh, replace=False)
-                base_sh = n_over // num_sh
-                rem_sh = n_over % num_sh
-                for s_i, t_slot in enumerate(sh_targets):
-                    work_counts[t_slot] += min(
-                        base_sh + (1 if s_i < rem_sh else 0), cap_tau + 3
-                    )
+                # Pseudorandomly fill available headroom (cap_tau - work_counts) on lightest slots
+                headroom = cap_tau - work_counts
+                avail_idx = np.where(headroom > 0)[0]
+                # Shuffle ties via per-tick CSPRNG/PRNG while favoring lightest slots
+                tie_break = rng.random(len(avail_idx))
+                order = np.lexsort((tie_break, work_counts[avail_idx]))
+                for idx in avail_idx[order]:
+                    if n_over <= 0:
+                        break
+                    take = min(int(headroom[idx]), n_over)
+                    work_counts[idx] += take
+                    n_over -= take
 
-            # 2. Constant-Occupancy Cover on remaining zero-token slots
-            zero_mask = work_counts == 0
-            wake_draw = rng.random(num_e) < idle_cover_prob
-            cover_floor = np.where(zero_mask & wake_draw, 1, work_counts)
-
-            # 3. (ε, δ)-DP Truncated Gaussian Count Blinding
-            gauss_noise = np.abs(rng.normal(loc=0.0, scale=dp_sigma, size=num_e))
-            leveled = (
-                (1.0 - level_alpha) * cover_floor
+            # Stage 3: Sound Shifted Two-Sided Gaussian + Data-Independent Clipping [N_min, N_max]
+            gauss_noise = rng.normal(loc=0.0, scale=dp_sigma, size=num_e)
+            noisy_real = (
+                (1.0 - level_alpha) * work_counts.astype(np.float64)
                 + level_alpha * float(cap_tau)
+                + mu_shift
                 + gauss_noise
             )
-            padded = np.where(
-                cover_floor > 0,
-                np.clip(np.round(leveled).astype(np.int32), cover_floor, max_pad_ceil),
-                0,
-            )
+            padded = np.clip(np.round(noisy_real).astype(np.int32), n_min, n_max)
+            underflow_slots += int(np.sum(padded < work_counts))
             total_dummy_padded += float(np.maximum(padded - work_counts, 0).sum())
             defended_counts[q_idx, l_idx] = padded
 
-    stats = {
-        "gumbel_scale": round(gumbel_scale, 5),
-        "prob_margin_gamma": prob_margin_gamma,
-        "shadow_cap_tau": int(cap_tau),
-        "idle_cover_prob": round(idle_cover_prob, 2),
-        "dp_sigma": round(dp_sigma, 2),
-        "shadow_redirect_fraction_pct": round(
-            100.0 * total_shadow_redirected / total_real_tokens, 2
-        ),
-        "dummy_token_overhead_ratio": round(
-            total_dummy_padded / total_real_tokens, 3
-        ),
-    }
+    stats: dict[str, float | int] = dict(sched)
+    stats.update(
+        {
+            "shadow_redirect_fraction_pct": round(
+                100.0 * total_shadow_redirected / total_real_tokens, 2
+            ),
+            "dummy_token_overhead_ratio": round(
+                total_dummy_padded / total_real_tokens, 3
+            ),
+            "empirical_underflow_slots": int(underflow_slots),
+            "empirical_underflow_rate": round(underflow_slots / float(max(total_slots, 1)), 8),
+        }
+    )
     return defended_counts, stats
 
 

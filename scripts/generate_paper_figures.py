@@ -226,17 +226,18 @@ def make_fig4_oblivdispatch_pareto_and_theory(data: dict[str, Any]) -> None:
         short_lbl = "OLMoE" if "olmoe" in mk else ("GraniteMoE" if "granite" in mk else "QwenMoE")
         dom_b = models[mk]["domain5_benchmark"]
         u_acc = dom_b["attack_sweep"]["sigma_50us"]["tile_global_barrier"]["accuracy_pct"]
+        u_std = dom_b["attack_sweep"]["sigma_50us"]["tile_global_barrier"].get("accuracy_fold_std_pct", 0.0)
         accs = [u_acc] + [d["accuracy_pct_sigma50_global"] for d in dom_b["oblivdispatch_sweep"]]
-        tpots = [0.0] + [d["tpot_overhead_pct"] for d in dom_b["oblivdispatch_sweep"]]
+        stds = [u_std] + [d.get("accuracy_std_sigma50_global", 0.0) for d in dom_b["oblivdispatch_sweep"]]
         col = "#c00000" if idx == 0 else "#1f4e79"
-        ax1.plot(xp, accs, marker="o", lw=1.9, color=col, label=f"{short_lbl} Acc (%)")
+        ax1.errorbar(xp, accs, yerr=stds, marker="o", lw=1.9, capsize=2.5, color=col, label=f"{short_lbl} Acc (%)")
 
     ax1.axhline(20.0, color="black", ls=":", lw=1.1, label="Random Floor (20%)")
     ax1.set_xticks(xp)
     ax1.set_xticklabels(eps_x)
     ax1.set_xlabel("Privacy Budget $\\epsilon$ ($\\delta = 10^{-5}$)")
     ax1.set_ylabel("5-Domain Global-Barrier Acc (%)")
-    ax1.set_ylim(0, 100)
+    ax1.set_ylim(0, 102)
     ax1.grid(True, alpha=0.25)
 
     ax1r = ax1.twinx()
@@ -246,14 +247,14 @@ def make_fig4_oblivdispatch_pareto_and_theory(data: dict[str, Any]) -> None:
         tpots = [0.0] + [d["tpot_overhead_pct"] for d in dom_b["oblivdispatch_sweep"]]
         col = "#d95f02" if idx == 0 else "#2e75b6"
         ax1r.plot(xp, tpots, marker="s", ls="--", lw=1.5, color=col, label=f"{short_lbl} TPOT Δ%")
-    ax1r.axhline(5.5, color="#2e75b6", ls="-.", lw=1.0, alpha=0.6)
+    ax1r.axhline(0.0, color="#777777", ls=":", lw=0.8, alpha=0.6)
     ax1r.set_ylabel("Serving TPOT Overhead (%)")
-    ax1r.set_ylim(-0.5, 10.0)
+    ax1r.set_ylim(-1.0, 14.5)
 
     l1, lb1 = ax1.get_legend_handles_labels()
     l2, lb2 = ax1r.get_legend_handles_labels()
-    ax1.legend(l1 + l2, lb1 + lb2, loc="upper right", fontsize=6.4)
-    ax1.set_title("(a) Accuracy Collapse vs. TPOT (<5.5%)")
+    ax1.legend(l1 + l2, lb1 + lb2, loc="upper right", ncol=2, fontsize=5.8, framealpha=0.92)
+    ax1.set_title("(a) Accuracy Collapse vs. TPOT Overhead")
 
     # Panel (b): Empirical Mutual Information vs Theorem 2 zCDP Upper Bound
     thm2 = data["theory_verification"]["theorem2_dp_bounds"]
@@ -274,14 +275,15 @@ def make_fig4_oblivdispatch_pareto_and_theory(data: dict[str, Any]) -> None:
         short_lbl = "OLMoE" if "olmoe" in mk else ("GraniteMoE" if "granite" in mk else "QwenMoE")
         dom_b = models[mk]["domain5_benchmark"]
         emp_mi = [d["empirical_mi_bits_sigma50_global"] for d in dom_b["oblivdispatch_sweep"]]
+        emp_std = [d.get("empirical_mi_std_sigma50_global", 0.0) for d in dom_b["oblivdispatch_sweep"]]
         col = "#c00000" if idx == 0 else "#1f4e79"
-        ax2.plot(xp2, emp_mi, marker="o", lw=1.9, color=col, label=f"{short_lbl} Empirical MI")
+        ax2.errorbar(xp2, emp_mi, yerr=emp_std, marker="o", lw=1.9, capsize=2.5, color=col, label=f"{short_lbl} Empirical MI")
 
     ax2.set_xticks(xp2)
     ax2.set_xticklabels([str(e) for e in eps_num])
     ax2.set_xlabel("Privacy Budget $\\epsilon$ ($\\delta = 10^{-5}$)")
-    ax2.set_ylabel("Mutual Information $I(Y; \\hat{Y})$ (bits)")
-    ax2.set_ylim(-0.05, 2.45)
+    ax2.set_ylabel("Permutation-Calibrated MI (bits)")
+    ax2.set_ylim(-0.05, 1.65)
     ax2.set_title("(b) Empirical Leakage vs. Theorem 2 Bound")
     ax2.grid(True, alpha=0.25)
     ax2.legend(loc="upper right", fontsize=7.0)

@@ -4,13 +4,14 @@ Implements exact numerical evaluators for the two theoretical pillars in the pap
   - Theorem 1 (Tile-Boundary Side-Channel Capacity Amplification):
     Computes exact binary/multi-step AWGN mutual information I(B; ΔITL) in bits/probe
     for Tile-Boundary Primed Canaries (step Δ_tile across M_tile) vs. Naive Unprimed
-    Canaries (within-tile slope α_in), proving quadratic SNR suppression O((α_in/σ)^2)
-    away from hardware tile cliffs.
-  - Theorem 2 (OblivDispatch (ε, δ)-DP Composition, Mutual Information Cap & ΔPPL Bound):
-    Computes zero-concentrated DP (ρ-zCDP -> (ε, δ)-DP) composition across L layers,
-    variational/Fano mutual information upper bounds I(X_victim; ΔITL_adv) <= B(ε, δ),
-    and worst-case Lipschitz next-token Perplexity shift bounds under probability-margin
-    secondary expert perturbation.
+    Canaries (within-tile slope α_in).
+  - Theorem 2 (OblivDispatch Sound Shifted Two-Sided Gaussian (ε, δ)-DP & MI Bound):
+    Calibrates exact ρ-zCDP with split failure probability δ = δ_zCDP + δ_tail
+    (where δ_tail = L * E * Φ(-μ_shift / σ_DP) bounds the union-bound probability
+    of any slot underflowing c_{l,e} under two-sided Gaussian noise and data-independent
+    clipping [N_min, N_max]), derives the exact MI upper bound I(Y; ΔITL_adv) <=
+    min(log2 K, ρ / ln 2 + δ * log2 K), Fano Bayes accuracy ceiling, and Lipschitz
+    perplexity perturbation bound.
 """
 
 from __future__ import annotations
@@ -27,13 +28,37 @@ def binary_entropy_bits(p: float) -> float:
     return -p * math.log2(p) - (1.0 - p) * math.log2(1.0 - p)
 
 
+def normal_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def inverse_normal_cdf(p: float) -> float:
+    """High-precision binary search for Φ^{-1}(p) with p in (0, 1)."""
+    assert 0.0 < p < 1.0
+    lo, hi = -10.0, 10.0
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        if normal_cdf(mid) < p:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def zcdp_rho_for_eps_delta(epsilon: float, delta_zcdp: float) -> float:
+    """Solves ε = ρ + 2 * sqrt(ρ * ln(1 / δ_zCDP)) for ρ > 0."""
+    ln_inv = math.log(1.0 / delta_zcdp)
+    u = -math.sqrt(ln_inv) + math.sqrt(ln_inv + epsilon)
+    return u * u
+
+
 def awgn_binary_step_mi_bits(
     step_amplitude_us: float,
     sigma_eff_us: float,
     prior_p: float = 0.5,
     num_grid: int = 2001,
 ) -> float:
-    """Exact mutual information I(S; Y) in bits for S in {0, Δ} + N(0, σ_eff^2) via quadrature."""
+    """Exact mutual information I(S; Y) in bits for S in {0, Δ} + N(0, σ_eff^2)."""
     if sigma_eff_us <= 1e-9:
         return binary_entropy_bits(prior_p)
     if abs(step_amplitude_us) <= 1e-12:
@@ -43,7 +68,6 @@ def awgn_binary_step_mi_bits(
     if snr_half > 8.0:
         return binary_entropy_bits(prior_p)
 
-    # Gauss-Legendre / uniform fine grid over [-7σ, Δ + 7σ]
     lo = -7.0 * sigma_eff_us
     hi = abs(step_amplitude_us) + 7.0 * sigma_eff_us
     y = np.linspace(lo, hi, num_grid, dtype=np.float64)
@@ -95,33 +119,42 @@ def theorem2_oblivdispatch_dp_mi_bound(
     delta: float = 1e-5,
     num_classes: int = 5,
     num_layers: int = 16,
+    num_experts: int = 64,
     prob_margin_gamma: float = 0.00035,
     base_ppl: float = 28.5865,
     layer_residual_lip: float = 1.85,
 ) -> dict[str, Any]:
-    """Evaluates Theorem 2 theoretical MI upper bound & Perplexity shift bound.
+    """Evaluates Theorem 2 with split δ = δ_zCDP + δ_tail (δ/2 each).
 
-    For an (ε, δ)-DP mechanism M acting on victim routing trace X_victim (with uniform
-    prior over K classes, H(Y) = log2(K) bits), standard DP-to-Mutual-Information
-    bounds (Cuff & Yu 2016; Bun & Steinke 2016 zCDP) yield:
-      I(Y; M(X)) <= min(log2(K), (min(ε, ε^2 / 2) / ln 2) + δ * log2(K) / ln 2)
-    under pure/zCDP Gaussian-Gumbel composition, and Fano's inequality converts this
-    MI cap into a strict upper bound on optimal Bayes classification accuracy!
+    Under the sound shifted two-sided Gaussian mechanism:
+      T_{l,e} = Clip_{[N_min, N_max]}(Round((1 - α_ε) c_{l,e} + α_ε τ_cap + μ_shift + Z_{l,e})),
+    where Z_{l,e} ~ N(0, σ_DP^2), σ_DP = Δ_2(ε) / sqrt(2 * ρ), and
+    μ_shift = σ_DP * Φ^{-1}(1 - δ_tail / (L * E)):
+      - With probability >= 1 - δ_tail, no slot underflows c_{l,e}, so zero
+        secret-dependent lower clipping occurs and the output is pure post-processing
+        of a ρ-zCDP Gaussian mechanism (with δ_zCDP = δ/2).
+      - By Bun & Steinke (2016) and Cuff & Yu (2016),
+          I(Y; ΔITL_adv) <= min(log2 K, ρ / ln(2) + δ * log2(K)) bits.
     """
     h_max_bits = math.log2(num_classes)
+    delta_zcdp = 0.5 * delta
+    delta_tail = 0.5 * delta
+    rho_zcdp = zcdp_rho_for_eps_delta(epsilon, delta_zcdp)
 
-    # zCDP parameter ρ calibrated so ε = ρ + 2*sqrt(ρ * ln(1/δ)) => solve quadratic for sqrt(ρ)
-    ln_inv_delta = math.log(1.0 / delta)
-    # u^2 + 2*sqrt(ln(1/δ))*u - ε = 0  where u = sqrt(ρ)
-    u = -math.sqrt(ln_inv_delta) + math.sqrt(ln_inv_delta + epsilon)
-    rho_zcdp = u * u
+    # Required z-score for union-bound underflow probability <= δ_tail across L*E slots
+    per_slot_tail = delta_tail / float(num_layers * num_experts)
+    z_tail = inverse_normal_cdf(1.0 - per_slot_tail)
 
-    # By Proposition 1.4 of Bun & Steinke (2016), ρ-zCDP implies KL(P_{M|X=x} || P_M) <= ρ nats,
-    # hence I(Y; ΔITL_adv) <= I(X_victim; M(X_victim)) <= ρ / ln(2) bits!
-    mi_upper_bits = min(h_max_bits, rho_zcdp / math.log(2.0) + delta * h_max_bits)
+    # Exact chain-rule MI bound under split δ = δ_zCDP + δ_tail:
+    #   I(Y; O) <= H_2(δ_tail) + (1 - δ_tail) * (ρ / ln 2) + δ_tail * log2(K)
+    mi_upper_bits = min(
+        h_max_bits,
+        (1.0 - delta_tail) * (rho_zcdp / math.log(2.0))
+        + delta_tail * h_max_bits
+        + binary_entropy_bits(delta_tail),
+    )
 
-    # Invert Fano's inequality: H(Y) - I(Y; Y_hat) <= H_2(P_e) + P_e * log2(K - 1)
-    # Find largest accuracy Acc = 1 - P_e consistent with I(Y; Y_hat) <= mi_upper_bits
+    # Fano's inequality ceiling on optimal Bayes accuracy
     max_bayes_acc = 1.0 / num_classes
     for acc_cand in np.linspace(1.0 / num_classes, 1.0, 2001):
         pe = 1.0 - float(acc_cand)
@@ -132,13 +165,15 @@ def theorem2_oblivdispatch_dp_mi_bound(
         else:
             break
 
-    # Perplexity perturbation bound when swapping 1 secondary expert within Δp <= γ_p
-    delta_nll_bound = num_layers * prob_margin_gamma * layer_residual_lip
+    delta_nll_bound = 2.0 * num_layers * prob_margin_gamma * layer_residual_lip
     delta_ppl_upper = base_ppl * (math.exp(delta_nll_bound) - 1.0)
 
     return {
         "epsilon": epsilon,
         "delta": delta,
+        "delta_zcdp": delta_zcdp,
+        "delta_tail": delta_tail,
+        "z_tail_sigma": round(z_tail, 3),
         "rho_zcdp_nats": round(rho_zcdp, 5),
         "theoretical_mi_upper_bits": round(mi_upper_bits, 4),
         "fano_bayes_accuracy_ceiling_pct": round(100.0 * max_bayes_acc, 2),

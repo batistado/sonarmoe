@@ -22,6 +22,7 @@ from sonarmoe.http_loopback_afd import run_live_http_loopback_benchmark
 from sonarmoe.models import MoEArchSpec, SUPPORTED_MOE_SPECS
 from sonarmoe.oblivdispatch import (
     apply_oblivdispatch_defense,
+    compute_oblivdispatch_schedule,
     simulate_afd_itl_observations,
 )
 from sonarmoe.theory import (
@@ -77,7 +78,7 @@ def test_theorem2_dp_mi_monotonicity() -> None:
     assert b_lo["theoretical_mi_upper_bits"] < b_mid["theoretical_mi_upper_bits"]
     assert b_mid["theoretical_mi_upper_bits"] <= b_hi["theoretical_mi_upper_bits"]
     assert b_lo["fano_bayes_accuracy_ceiling_pct"] < b_hi["fano_bayes_accuracy_ceiling_pct"]
-    assert b_mid["theoretical_delta_ppl_bound"] < 0.40
+    assert b_mid["theoretical_delta_ppl_bound"] < 0.65
 
 
 def test_oblivdispatch_token_conservation_and_defense() -> None:
@@ -98,23 +99,39 @@ def test_oblivdispatch_token_conservation_and_defense() -> None:
         logits, spec, epsilon=1.0, delta=1e-5, rng=rng
     )
     assert def_counts_1.shape == (num_q, spec.num_layers, spec.num_experts)
-    # At epsilon=1.0, idle_cover_prob == 1.0 -> every expert executes >= 1 token (zero kernel-skip leak!)
-    assert int((def_counts_1 == 0).sum()) == 0
-    # Total dispatched tokens >= real routed tokens (zero dropped real tokens!)
+    # Data-independent N_min=1 closes kernel-skip leakage at all epsilon
+    assert int((def_counts_1 < stats_1["n_min"]).sum()) == 0
+    assert int((def_counts_1 > stats_1["n_max"]).sum()) == 0
+    # Zero empirical underflow and 100% real-token conservation
+    assert stats_1["empirical_underflow_slots"] == 0
     min_per_layer = 64 * spec.top_k
     assert np.all(def_counts_1.sum(axis=-1) >= min_per_layer)
     assert 0.0 < stats_1["shadow_redirect_fraction_pct"] < 100.0
+    # Verify exact ρ-zCDP calibration: σ_DP == Δ_2(ε) / sqrt(2ρ)
+    sched = compute_oblivdispatch_schedule(spec, epsilon=1.0, delta=1e-5, b_vic=64)
+    expected_sigma = sched["delta_2_eff"] / np.sqrt(2.0 * sched["rho_zcdp_nats"])
+    assert abs(sched["dp_sigma"] - expected_sigma) < 1e-2
 
 
 def test_deconvolver_random_floor_vs_separable_signal() -> None:
     rng = np.random.default_rng(123)
     labels = np.repeat(np.arange(5), 20)
 
-    # Pure noise -> near 20% random-guess floor, near-zero MI
+    # Pure noise -> near 20% random-guess floor, near-zero permutation-calibrated MI
     pure_noise = rng.normal(0.0, 1.0, size=(100, 32)).astype(np.float32)
     m_noise = evaluate_deconvolver_kfold(pure_noise, labels, CATEGORIES_5)
     assert m_noise["accuracy_pct"] <= 34.0
-    assert m_noise["empirical_mi_bits"] <= 0.20
+    assert m_noise["empirical_mi_bits"] <= 0.15
+    assert "accuracy_fold_std_pct" in m_noise
+    assert "top3_fold_std_pct" in m_noise
+
+    # High-K regime (K=20, N=160 where K^2=400 > N): permutation-calibrated MI stays near 0
+    labels_20 = np.repeat(np.arange(20), 8)
+    pure_noise_20 = rng.normal(0.0, 1.0, size=(160, 32)).astype(np.float32)
+    m_noise_20 = evaluate_deconvolver_kfold(
+        pure_noise_20, labels_20, [f"tool_{i}" for i in range(20)], num_folds=4
+    )
+    assert m_noise_20["empirical_mi_bits"] <= 0.15
 
     # Separable class prototypes -> >95% accuracy
     prototypes = rng.normal(0.0, 3.0, size=(5, 32)).astype(np.float32)

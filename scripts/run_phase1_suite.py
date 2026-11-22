@@ -60,6 +60,7 @@ from sonarmoe import (
 
 RESULTS_DIR = ROOT_DIR / "results"
 SEED = 20261118
+EVAL_SEEDS = [20261118, 20261119, 20261120]
 B_VICTIM = 64
 B_CANARY_TILE = 122
 NUM_PROBES = 32
@@ -225,77 +226,130 @@ def evaluate_model_suite(
                 f"Naive16={m_n16['accuracy_pct']:5.1f}%"
             )
 
-        # OblivDispatch sweep + exact full-model Corpus PPL
-        def_cache: dict[float, tuple[np.ndarray, dict[str, float]]] = {}
+        # OblivDispatch 3-seed sweep + exact 3-seed full-model Corpus PPL
+        ppl_corpus_token_counts = [
+            int(tokenizer(t, return_tensors="pt")["input_ids"].shape[1])
+            for t in PPL_EVAL_CORPUS
+        ]
+        ppl_corpus_meta = {
+            "corpus_name": "MoELeak-Bench/PPL_EVAL_CORPUS",
+            "num_passages": len(PPL_EVAL_CORPUS),
+            "total_tokens": int(sum(ppl_corpus_token_counts)),
+            "tokens_per_passage": ppl_corpus_token_counts,
+        }
+
+        def_cache_seed0: dict[float, tuple[np.ndarray, dict[str, Any]]] = {}
         gumbel_map: dict[float, float] = {}
         for eps in DP_EPSILON_LIST:
-            dc, ds = apply_oblivdispatch_defense(
-                dom_traces["router_logits"], spec, eps, DP_DELTA, rng
+            dc0, ds0 = apply_oblivdispatch_defense(
+                dom_traces["router_logits"],
+                spec,
+                eps,
+                DP_DELTA,
+                np.random.default_rng(EVAL_SEEDS[0] + int(eps * 100)),
             )
-            def_cache[eps] = (dc, ds)
-            gumbel_map[eps] = ds["gumbel_scale"]
+            def_cache_seed0[eps] = (dc0, ds0)
+            gumbel_map[eps] = float(ds0["gumbel_scale"])
 
-        ppl_map = evaluate_corpus_perplexity(
-            model, tokenizer, spec, PPL_EVAL_CORPUS, gumbel_map
-        )
-        base_ppl = ppl_map["undefended"]
+        ppl_by_seed = [
+            evaluate_corpus_perplexity(
+                model, tokenizer, spec, PPL_EVAL_CORPUS, gumbel_map, seed=s
+            )
+            for s in EVAL_SEEDS
+        ]
+        base_ppl = ppl_by_seed[0]["undefended"]
 
         dom_defense_sweep: list[dict[str, Any]] = []
         for eps in DP_EPSILON_LIST:
-            dc, ds = def_cache[eps]
-            ditl_d_glob, def_tpot = simulate_afd_itl_observations(
-                dc,
-                codebook["counts_tile"],
-                spec,
-                tile_prof["samples_table_us"],
-                sigma_net_us=50.0,
-                stream_repeats=STREAM_REPEATS,
-                rng=rng,
-                combine_mode="global_barrier",
-                non_routed_step_ms=non_routed_ms,
-            )
-            md_glob = evaluate_deconvolver_kfold(ditl_d_glob, dom_labels, CATEGORIES_5)
+            acc_g_list, f1_g_list, mi_g_list = [], [], []
+            acc_s_list, f1_s_list, mi_s_list = [], [], []
+            tpot_list, underflow_list = [], []
+            last_ds: dict[str, Any] = def_cache_seed0[eps][1]
 
-            ditl_d_sel, _ = simulate_afd_itl_observations(
-                dc,
-                codebook["counts_tile"],
-                spec,
-                tile_prof["samples_table_us"],
-                sigma_net_us=50.0,
-                stream_repeats=STREAM_REPEATS,
-                rng=rng,
-                combine_mode="selective_ibgda",
-                non_routed_step_ms=non_routed_ms,
-            )
-            md_sel = evaluate_deconvolver_kfold(ditl_d_sel, dom_labels, CATEGORIES_5)
+            for s_idx, s_val in enumerate(EVAL_SEEDS):
+                s_rng = np.random.default_rng(s_val + int(eps * 1000))
+                if s_idx == 0:
+                    dc, ds = def_cache_seed0[eps]
+                else:
+                    dc, ds = apply_oblivdispatch_defense(
+                        dom_traces["router_logits"], spec, eps, DP_DELTA, s_rng
+                    )
+                last_ds = ds
+                underflow_list.append(int(ds["empirical_underflow_slots"]))
 
-            def_tpot_tot = def_tpot + 0.12
-            ppl_v = ppl_map[f"eps_{eps}"]
-            dppl = round(ppl_v - base_ppl, 4)
-            tpot_oh = round(100.0 * (def_tpot_tot - base_tpot_ms) / base_tpot_ms, 2)
+                ditl_d_glob, def_tpot = simulate_afd_itl_observations(
+                    dc,
+                    codebook["counts_tile"],
+                    spec,
+                    tile_prof["samples_table_us"],
+                    sigma_net_us=50.0,
+                    stream_repeats=STREAM_REPEATS,
+                    rng=s_rng,
+                    combine_mode="global_barrier",
+                    non_routed_step_ms=non_routed_ms,
+                )
+                md_glob = evaluate_deconvolver_kfold(ditl_d_glob, dom_labels, CATEGORIES_5)
+
+                ditl_d_sel, _ = simulate_afd_itl_observations(
+                    dc,
+                    codebook["counts_tile"],
+                    spec,
+                    tile_prof["samples_table_us"],
+                    sigma_net_us=50.0,
+                    stream_repeats=STREAM_REPEATS,
+                    rng=s_rng,
+                    combine_mode="selective_ibgda",
+                    non_routed_step_ms=non_routed_ms,
+                )
+                md_sel = evaluate_deconvolver_kfold(ditl_d_sel, dom_labels, CATEGORIES_5)
+
+                acc_g_list.append(md_glob["accuracy_pct"])
+                f1_g_list.append(md_glob["macro_f1_pct"])
+                mi_g_list.append(md_glob["empirical_mi_bits"])
+                acc_s_list.append(md_sel["accuracy_pct"])
+                f1_s_list.append(md_sel["macro_f1_pct"])
+                mi_s_list.append(md_sel["empirical_mi_bits"])
+                tpot_list.append(def_tpot + 0.12)
+
+            ppl_vals = [p[f"eps_{eps}"] for p in ppl_by_seed]
+            ppl_mean = round(float(np.mean(ppl_vals)), 4)
+            ppl_std = round(float(np.std(ppl_vals)), 4)
+            dppl_mean = round(ppl_mean - base_ppl, 4)
+            tpot_mean = float(np.mean(tpot_list))
+            tpot_oh = round(100.0 * (tpot_mean - base_tpot_ms) / base_tpot_ms, 2)
 
             dom_defense_sweep.append(
                 {
                     "epsilon": eps,
                     "delta": DP_DELTA,
-                    "params": ds,
-                    "accuracy_pct_sigma50_global": md_glob["accuracy_pct"],
-                    "macro_f1_pct_sigma50_global": md_glob["macro_f1_pct"],
-                    "empirical_mi_bits_sigma50_global": md_glob["empirical_mi_bits"],
-                    "accuracy_pct_sigma50_ibgda": md_sel["accuracy_pct"],
-                    "macro_f1_pct_sigma50_ibgda": md_sel["macro_f1_pct"],
-                    "empirical_mi_bits_sigma50_ibgda": md_sel["empirical_mi_bits"],
-                    "ppl": ppl_v,
-                    "delta_ppl": dppl,
-                    "tpot_ms": round(def_tpot_tot, 3),
+                    "num_seeds": len(EVAL_SEEDS),
+                    "params": last_ds,
+                    "total_underflow_slots_3seeds": int(sum(underflow_list)),
+                    "accuracy_pct_sigma50_global": round(float(np.mean(acc_g_list)), 2),
+                    "accuracy_std_sigma50_global": round(float(np.std(acc_g_list)), 2),
+                    "macro_f1_pct_sigma50_global": round(float(np.mean(f1_g_list)), 2),
+                    "empirical_mi_bits_sigma50_global": round(float(np.mean(mi_g_list)), 4),
+                    "empirical_mi_std_sigma50_global": round(float(np.std(mi_g_list)), 4),
+                    "accuracy_pct_sigma50_ibgda": round(float(np.mean(acc_s_list)), 2),
+                    "accuracy_std_sigma50_ibgda": round(float(np.std(acc_s_list)), 2),
+                    "macro_f1_pct_sigma50_ibgda": round(float(np.mean(f1_s_list)), 2),
+                    "empirical_mi_bits_sigma50_ibgda": round(float(np.mean(mi_s_list)), 4),
+                    "empirical_mi_std_sigma50_ibgda": round(float(np.std(mi_s_list)), 4),
+                    "ppl": ppl_mean,
+                    "ppl_std": ppl_std,
+                    "delta_ppl": dppl_mean,
+                    "tpot_ms": round(tpot_mean, 3),
                     "tpot_overhead_pct": tpot_oh,
                 }
             )
             print(
-                f"        [OblivDispatch ε={eps:3.1f}] "
-                f"Global={md_glob['accuracy_pct']:5.1f}% (MI={md_glob['empirical_mi_bits']:.3f}b) | "
-                f"IBGDA={md_sel['accuracy_pct']:5.1f}% | PPL={ppl_v:.4f} ({dppl:+.4f}) | "
-                f"TPOT={def_tpot_tot:.2f}ms ({tpot_oh:+.2f}%)"
+                f"        [OblivDispatch ε={eps:3.1f} (3-seed)] "
+                f"Global={np.mean(acc_g_list):5.1f}±{np.std(acc_g_list):4.1f}% "
+                f"(MI={np.mean(mi_g_list):.3f}b) | "
+                f"IBGDA={np.mean(acc_s_list):5.1f}±{np.std(acc_s_list):4.1f}% "
+                f"(MI={np.mean(mi_s_list):.3f}b) | "
+                f"PPL={ppl_mean:.4f}±{ppl_std:.4f} ({dppl_mean:+.4f}) | "
+                f"TPOT={tpot_mean:.2f}ms ({tpot_oh:+.2f}%) | underflow={sum(underflow_list)}"
             )
 
         # 4. Tier 2: 160-Query 20-Schema Enterprise MCP Tool-Call Reconstruction
@@ -425,7 +479,7 @@ def evaluate_model_suite(
                 live_undef["delta_itl_us"], dom_labels, CATEGORIES_5
             )
 
-            dc_eps1 = def_cache[1.0][0]
+            dc_eps1 = def_cache_seed0[1.0][0]
             live_def1 = run_live_http_loopback_benchmark(
                 model, spec, dc_eps1, can_sub, stream_tokens_per_probe=3
             )
@@ -481,6 +535,7 @@ def evaluate_model_suite(
                 "non_routed_step_ms": non_routed_ms,
                 "undefended_tpot_ms": round(base_tpot_ms, 3),
                 "undefended_ppl": base_ppl,
+                "ppl_eval_corpus": ppl_corpus_meta,
             },
             "domain5_benchmark": {
                 "whitebox_rank_oracle": oracle_dom,
@@ -538,6 +593,7 @@ def main() -> None:
             delta=DP_DELTA,
             num_classes=5,
             num_layers=16,
+            num_experts=64,
             prob_margin_gamma=0.00035,
             base_ppl=primary_ppl,
         )
