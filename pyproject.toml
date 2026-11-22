@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sonarmoe"
+version = "0.1.0"
+description = "Remote Prompt and Tool-Schema Reconstruction via Cross-Node Expert Contention in Disaggregated MoE Serving and Differentially Private Mitigation"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "Apache-2.0"}
+authors = [
+  {name = "Mohammed Kamran Syed", email = "mohammedkamran.syed@ieee.org"},
+]
+dependencies = [
+  "torch>=2.4.0",
+  "transformers>=4.45.0",
+  "numpy>=1.26.0",
+  "matplotlib>=3.8.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sonarmoe*", "moeleak_bench*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

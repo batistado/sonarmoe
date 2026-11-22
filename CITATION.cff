@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use SonarMoE, OblivDispatch, or MoELeak-Bench in your research, please cite our manuscript."
+title: "SonarMoE: Remote Prompt and Tool-Schema Reconstruction via Cross-Node Expert Contention in Disaggregated MoE Serving and Differentially Private Mitigation"
+type: software
+version: 0.1.0
+date-released: "2026-11-19"
+license: Apache-2.0
+authors:
+  - family-names: Syed
+    given-names: Mohammed Kamran
+    affiliation: "IEEE Independent Researcher, Mountain House, CA, USA"
+    orcid: "https://orcid.org/0009-0009-9058-5375"
+  - family-names: Rentala
+    given-names: Anudeep
+    affiliation: "IEEE Independent Researcher, Fremont, CA, USA"
+  - family-names: Rahul
+    given-names: Somesh
+    affiliation: "IEEE Independent Researcher, Fremont, CA, USA"
+  - family-names: Pai
+    given-names: Raghuram Malpe
+    affiliation: "IEEE Independent Researcher, Sunnyvale, CA, USA"
+  - family-names: Dara
+    given-names: Krishna Suman
+    affiliation: "IEEE Independent Researcher, Sunnyvale, CA, USA"
