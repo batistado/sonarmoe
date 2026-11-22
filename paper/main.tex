@@ -39,9 +39,11 @@
 \newcommand{\OD}{\textsc{OblivDispatch}}
 \newcommand{\MLB}{\textsc{MoELeak-Bench}}
 
-\setlength{\textfloatsep}{8pt plus 2pt minus 2pt}
-\setlength{\dbltextfloatsep}{9pt plus 2pt minus 2pt}
-\setlength{\floatsep}{6pt plus 2pt minus 2pt}
+\setlength{\textfloatsep}{7pt plus 2pt minus 2pt}
+\setlength{\dbltextfloatsep}{8pt plus 2pt minus 2pt}
+\setlength{\floatsep}{5pt plus 2pt minus 2pt}
+\setlength{\abovecaptionskip}{4pt plus 1pt minus 1pt}
+\setlength{\belowcaptionskip}{0pt}
 
 \begin{document}
 
@@ -177,7 +179,7 @@ where $\xi_{\mathrm{gpu}}$ denotes sub-microsecond hardware execution jitter.
 
 \begin{figure*}[t]
   \centering
-  \includegraphics[width=0.92\textwidth]{fig1_tile_cliff_capacity.pdf}
+  \includegraphics[width=0.88\textwidth]{fig1_tile_cliff_capacity.pdf}
   \caption{Empirical hardware tile quantization and analytical side-channel capacity. (a) Measured Apple M5 Pro MPS $\mathrm{FP16}$ per-expert MLP latency across co-batched token counts $N \in [1, 192]$ on real \texttt{OLMoE-1B-7B} and \texttt{Granite-3.1-MoE} weights, revealing a sharp hardware tile step at $N = 128 \to 129$ right above the $N_{\mathrm{can}} = 122$ priming zone. (b) Exact per-probe side-channel capacity under Theorem~\ref{thm:capacity} across network jitter $\sigma_{\mathrm{net}} \in [5, 400]~\mu\mathrm{s}$ ($R=6$ streamed tokens).}
   \label{fig:tile_cliff}
 \end{figure*}
@@ -336,7 +338,7 @@ For any two $B_{\mathrm{vic}}$-token victim queries $X, X'$, Stage~2 produces co
 
 \begin{figure*}[t]
   \centering
-  \includegraphics[width=0.92\textwidth]{fig2_multimodel_jitter_asr.pdf}
+  \includegraphics[width=0.88\textwidth]{fig2_multimodel_jitter_asr.pdf}
   \caption{Five-domain blind prompt classification accuracy across network jitter $\sigma_{\mathrm{net}} \in \{10, 50, 200\}~\mu\mathrm{s}$ under zero length leakage ($B_{\mathrm{vic}} = 64$ tokens) on (a) \texttt{OLMoE-1B-7B} ($64$ experts, unnormalized $\text{top-}8$) and (b) \texttt{Granite-3.1-MoE} ($32$ experts, normalized $\text{top-}8$), comparing tile-sized \SM{} ($N_{\mathrm{can}} = 122$) under Selective IBGDA and Global Synchronous Barriers against uncalibrated naive canaries ($N \in \{16, 32\}$).}
   \label{fig:multimodel_asr}
 \end{figure*}
@@ -377,7 +379,7 @@ Second, remote black-box probing via \SM{} ($N_{\mathrm{can}} = 122$, $R=6$ stre
 
 \begin{figure*}[t]
   \centering
-  \includegraphics[width=0.92\textwidth]{fig3_mcp20_reconstruction.pdf}
+  \includegraphics[width=0.88\textwidth]{fig3_mcp20_reconstruction.pdf}
   \caption{Fine-grained $20$-schema Enterprise MCP tool-call reconstruction (\MLB{} Tier~2, $160$ constant-length JSON-RPC prefill chunks, random floor $= 5.0\%$ Top-1, $15.0\%$ Top-3). (a) Undefended Top-1 and Top-3 reconstruction accuracy across $\sigma_{\mathrm{net}} \in \{10, 50, 200\}~\mu\mathrm{s}$. (b) Collapse of $20$-way Top-1 and Top-3 accuracy to the random-guess floor under \OD{} across $\epsilon \in \{8.0, 2.0, 1.0, 0.5\}$ ($\sigma_{\mathrm{net}} = 50~\mu\mathrm{s}$).}
   \label{fig:mcp20}
 \end{figure*}
@@ -417,7 +419,7 @@ Fig.~\ref{fig:mcp20} and Table~\ref{tab:mcp20} evaluate Tier~2 ($160$ JSON-RPC p
 
 \begin{figure*}[t]
   \centering
-  \includegraphics[width=0.92\textwidth]{fig4_oblivdispatch_pareto_theory.pdf}
+  \includegraphics[width=0.88\textwidth]{fig4_oblivdispatch_pareto_theory.pdf}
   \caption{\OD{} $(\epsilon, \delta)$-DP mitigation tradeoff and Theorem~\ref{thm:dp_bound} verification ($\sigma_{\mathrm{net}} = 50~\mu\mathrm{s}$, $\delta = 10^{-5}$, $3$-seed mean $\pm$ std). (a) Attacker $5$-domain accuracy collapse vs.\ serving $\mathrm{TPOT}$ overhead across $\epsilon \in \{8.0, 4.0, 2.0, 1.0, 0.5\}$. (b) Permutation-calibrated empirical Mutual Information compared against Theorem~\ref{thm:dp_bound}'s analytical $\rho$-zCDP upper bound.}
   \label{fig:oblivdispatch}
 \end{figure*}
@@ -453,11 +455,11 @@ Fig.~\ref{fig:mcp20} and Table~\ref{tab:mcp20} evaluate Tier~2 ($160$ JSON-RPC p
 \end{table*}
 
 \subsection{OblivDispatch Pareto Analysis and Theorem 2 Audit}
-Fig.~\ref{fig:oblivdispatch} and Table~\ref{tab:oblivdispatch} evaluate sound per-tenant \OD{} across $\epsilon \in \{8.0, 4.0, 2.0, 1.0, 0.5\}$ ($\delta = 10^{-5}$, $3$ seeds). Across all $3 \times 5 \times 2$ runs, empirical underflow is identically $0$ slots, confirming that $\mu_{\mathrm{shift}} = \sigma_{\mathrm{DP}}\Phi^{-1}(1 - \delta_{\mathrm{tail}}/(LE))$ preserves $100\%$ of real victim tokens with data-independent clipping $[1, N_{\max}]$. Because exact query-level $\rho$-zCDP calibration sets $(1-\alpha_\epsilon)\Delta_{2,\mathrm{raw}} = \sigma_{\mathrm{DP}}\sqrt{2\rho}$, empirical leakage collapses immediately to the random floor even at $\epsilon = 8.0$ and obeys Theorem~\ref{thm:dp_bound}'s analytical upper bound across all budgets on \texttt{Granite-3.1-MoE} ($0.033 \le 1.447$, $0.015 \le 0.408$, $0.011 \le 0.110$, $0.014 \le 0.029$, $0.003 \le 0.007~\mathrm{bits}$) and on \texttt{OLMoE-1B-7B} for $\epsilon \ge 1.0$ ($0.057 \le 1.447$ down to $0.028 \le 0.029~\mathrm{bits}$, with a single-seed $N=100$ finite-sample fluctuation of $0.053~\mathrm{bits}$ at $\epsilon=0.5$ where IBGDA MI is $0.020~\mathrm{bits}$). Straggler-Slack Hiding keeps $\mathrm{TPOT}$ overhead at $+2.33\%$--$+2.42\%$ on \texttt{Granite-3.1-MoE} and $+7.94\%$--$+8.93\%$ on \texttt{OLMoE-1B-7B} (over an order of magnitude below uniform worst-case padding's $+700\%$ FFN inflation). On \texttt{PPL\_EVAL\_CORPUS}, $\Delta\mathrm{PPL}$ remains within $-0.002$ to $+0.241$ ($< 0.85\%$) on \texttt{OLMoE-1B-7B} ($371$ tokens) and $-0.089$ to $+0.021$ on \texttt{Granite-3.1-MoE} ($445$ tokens), where small negative shifts fall within the $\pm 0.09$ three-seed standard deviation of near-tie tail routing swaps on a finite evaluation corpus.
+Fig.~\ref{fig:oblivdispatch} and Table~\ref{tab:oblivdispatch} evaluate sound per-tenant \OD{} across $\epsilon \in \{8.0, 4.0, 2.0, 1.0, 0.5\}$ ($\delta = 10^{-5}$, $3$ seeds). Across all $3 \times 5 \times 2$ runs, empirical underflow is identically $0$ slots, confirming that $\mu_{\mathrm{shift}} = \sigma_{\mathrm{DP}}\Phi^{-1}(1 - \delta_{\mathrm{tail}}/(LE))$ preserves $100\%$ of real victim tokens with data-independent clipping $[1, N_{\max}]$. Because exact query-level $\rho$-zCDP calibration sets $(1-\alpha_\epsilon)\Delta_{2,\mathrm{raw}} = \sigma_{\mathrm{DP}}\sqrt{2\rho}$, empirical leakage collapses immediately to the random floor even at $\epsilon = 8.0$ and obeys Theorem~\ref{thm:dp_bound}'s analytical upper bound across all budgets on \texttt{Granite-3.1-MoE} ($0.033 \le 1.447$, $0.015 \le 0.408$, $0.011 \le 0.110$, $0.014 \le 0.029$, $0.003 \le 0.007~\mathrm{bits}$) and on \texttt{OLMoE-1B-7B} for $\epsilon \ge 1.0$ ($0.057 \le 1.447$ down to $0.028 \le 0.029~\mathrm{bits}$, with a single-seed $N=100$ finite-sample fluctuation of $0.053~\mathrm{bits}$ at $\epsilon=0.5$ where IBGDA MI is $0.020~\mathrm{bits}$). Straggler-Slack Hiding keeps $\mathrm{TPOT}$ overhead at $+2.33\%$--$+2.42\%$ on \texttt{Granite-3.1-MoE} and $+7.94\%$--$+8.93\%$ on \texttt{OLMoE-1B-7B} (over an order of magnitude below uniform worst-case padding's $+700\%$ FFN inflation). On \texttt{PPL\_EVAL\_CORPUS}, $\Delta\mathrm{PPL}$ remains within $-0.002$ to $+0.241$ ($< 0.85\%$) on \texttt{OLMoE-1B-7B} ($371$ tokens) and $-0.089$ to $+0.021$ on \texttt{Granite-3.1-MoE} ($445$ tokens), where small negative shifts fall within the $\pm 0.09$ three-seed standard deviation of near-tie tail swaps on a compact corpus; notably, Theorem~\ref{thm:dp_bound}'s analytical perplexity bound in~\eqref{eq:ppl_bound} holds per token independently of corpus length because Stages~2 and~3 introduce zero hidden-state error.
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=\columnwidth]{fig5_live_http_loopback_cm.pdf}
+  \includegraphics[width=0.92\columnwidth]{fig5_live_http_loopback_cm.pdf}
   \caption{End-to-end confusion matrices from our live localhost (\texttt{127.0.0.1}, \texttt{TCP\_NODELAY}) HTTP/1.1 chunked SSE streaming harness executing real M5 Pro MPS $\mathrm{FP16}$ kernels ($100$ victim queries + $1$ empty-cluster calibration run, $12{,}928$ streamed SSE frames total): (a) Undefended AFD ($39.0 \pm 7.4\%$ accuracy, $1.95\times$ random floor despite OS socket and host scheduling noise) vs.\ (b) \OD{} at $\epsilon = 1.0$ ($10.0\%$ accuracy, zero diagonal structure).}
   \label{fig:live_http}
 \end{figure}
@@ -494,6 +496,8 @@ Source code for \SM{} and \OD{}, the two-tier \MLB{} suite ($260$ constant-lengt
 The authors declare no competing financial interests. All evaluations used locally cached open-weight models on researcher hardware without external funding.
 
 \bibliographystyle{IEEEtran}
+\let\oldthebibliography\thebibliography
+\renewcommand\thebibliography[1]{\oldthebibliography{#1}\setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
 \bibliography{references}
 
 \end{document}
