@@ -432,6 +432,9 @@ def build_hub_repo_staging(hub_dir: Path, username: str) -> None:
     zip_src = REPO_ROOT / "paper" / "sonarmoe_tdsc_overleaf.zip"
     if zip_src.exists():
         shutil.copy2(zip_src, hub_dir / zip_src.name)
+    pdf_src = REPO_ROOT / "paper" / "main.pdf"
+    if pdf_src.exists():
+        shutil.copy2(pdf_src, hub_dir / "SonarMoE_IEEE_TDSC_Manuscript.pdf")
 
     hub_card = f"""---
 license: apache-2.0

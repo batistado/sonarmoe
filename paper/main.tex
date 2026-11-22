@@ -192,9 +192,9 @@ Let binary random variable $B \sim \mathrm{Bernoulli}(1/2)$ indicate whether Vic
 \begin{enumerate}
   \item Under Tile-Boundary Priming ($N_{\mathrm{can}} = M_{\mathrm{tile}} - \delta$), the differential contention echo is $\Delta \mu_{\mathrm{tile}} = L_{\mathrm{hit}}(\Delta_{\mathrm{tile}} + \alpha_{\mathrm{in}} N_{\mathrm{vic}})$, achieving exact mutual information capacity
   \begin{equation}\label{eq:cap_tile}
-    C_{\mathrm{tile}} = 1 - \mathbb{E}_{Z \sim \mathcal{N}(0,1)}\!\left[ \log_2\!\left(1 + \exp\!\left(-\frac{\Delta\mu_{\mathrm{tile}}^2 + 2\sigma_{\mathrm{eff}}\Delta\mu_{\mathrm{tile}} Z}{2\sigma_{\mathrm{eff}}^2}\right)\right) \right],
+    C_{\mathrm{tile}} = 1 - \mathbb{E}_{Z}\!\left[ \log_2\!\left(1 + \exp\!\left(-\frac{\Delta\mu_{\mathrm{tile}}^2 + 2\sigma_{\mathrm{eff}}\Delta\mu_{\mathrm{tile}} Z}{2\sigma_{\mathrm{eff}}^2}\right)\right) \right],
   \end{equation}
-  which satisfies $C_{\mathrm{tile}} \ge 1 - H_2\!\big(\Phi(-\sqrt{R}\,\Delta\mu_{\mathrm{tile}} / (2\sigma_{\mathrm{net}}))\big)$ bits per probe.
+  where $Z \sim \mathcal{N}(0, 1)$, which satisfies $C_{\mathrm{tile}} \ge 1 - H_2\!\big(\Phi(-\sqrt{R}\,\Delta\mu_{\mathrm{tile}} / (2\sigma_{\mathrm{net}}))\big)$ bits per probe.
   \item Under uncalibrated within-tile probing ($1 \le N_{\mathrm{can}} + N_{\mathrm{vic}} \le M_{\mathrm{tile}}$), the echo shrinks to $\Delta\mu_{\mathrm{naive}} = L_{\mathrm{hit}} \alpha_{\mathrm{in}} N_{\mathrm{vic}}$, and in the moderate-to-high jitter regime ($\sigma_{\mathrm{eff}} \gg \Delta\mu_{\mathrm{naive}}$), capacity decays quadratically:
   \begin{equation}\label{eq:cap_naive}
     C_{\mathrm{naive}} = \frac{R \, L_{\mathrm{hit}}^2 \, \alpha_{\mathrm{in}}^2 \, N_{\mathrm{vic}}^2}{8 \ln 2 \, \sigma_{\mathrm{net}}^2} + \mathcal{O}\!\left(\frac{\Delta\mu_{\mathrm{naive}}^4}{\sigma_{\mathrm{eff}}^4}\right).
@@ -251,9 +251,10 @@ where $\gamma_p \in [3.5 \times 10^{-4}, 8.0 \times 10^{-4}]$. Because $p_{(k)}$
 \emph{Stage 2 (Shadow-Expert Overflow Capping into Non-Straggler Slack):} Each Expert Rank caches lightweight read-only Shadow Replicas in idle HBM. Given raw victim expert counts $N_{\ell, e}^{\mathrm{raw}}$, \OD{} caps home-expert load at threshold $\tau_{\mathrm{cap}}(\epsilon)$ ($\widehat{N}_{\ell, e} = \min(N_{\ell, e}^{\mathrm{raw}}, \tau_{\mathrm{cap}}(\epsilon))$), bounding per-expert sensitivity below the canary cliff gap. Overflow tokens $\Omega_\ell = \sum_e \max(N_{\ell, e}^{\mathrm{raw}} - \tau_{\mathrm{cap}}(\epsilon), 0)$ are split across $S \le 4$ pseudorandomly chosen idle or lightest expert slots on under-loaded partner ranks. Rebalancing hot-expert excess onto idle partner slots simultaneously eliminates single-rank domain spikes and \emph{reduces} undefended straggler skew.
 
 \emph{Stage 3 (Constant-Occupancy Floor and $(\epsilon, \delta)$-DP Count Blinding):} On remaining zero-token slots ($w_{\ell, e} = 0$), \OD{} wakes each slot independently with probability $\rho_{\mathrm{cover}}(\epsilon) \in (0, 1]$ ($\rho_{\mathrm{cover}} = 1$ for $\epsilon \le 1.0$) by inserting $1$ zero-weight dummy token ($w_{\mathrm{dummy}} = 0$), closing the $\tau_{\mathrm{launch}}$ kernel-skip side channel without altering hidden states. Finally, on all active slots ($c_{\ell, e} > 0$), \OD{} levels counts toward $\tau_{\mathrm{cap}}(\epsilon)$ with folded Gaussian dummy padding:
-\begin{equation}\label{eq:dp_pad}
-  \widetilde{N}_{\ell, e} = \mathrm{Clip}\!\left( \mathrm{Round}\!\Big((1 - \alpha_\epsilon) c_{\ell, e} + \alpha_\epsilon \tau_{\mathrm{cap}}(\epsilon) + |Z_{\ell, e}|\Big),\; c_{\ell, e},\; N_{\max} \right),
-\end{equation}
+\begin{align}\label{eq:dp_pad}
+  \widetilde{N}_{\ell, e} = \mathrm{Clip}\Big(\mathrm{Round}\big((1 - \alpha_\epsilon) c_{\ell, e} &+ \alpha_\epsilon \tau_{\mathrm{cap}}(\epsilon) + |Z_{\ell, e}|\big), \nonumber\\
+  &c_{\ell, e},\; N_{\max} \Big),
+\end{align}
 where $Z_{\ell, e} \sim \mathcal{N}(0, \sigma_{\mathrm{DP}}(\epsilon)^2)$ and $N_{\max} \le 18 \ll M_{\mathrm{tile}}$. Because $\widetilde{N}_{\ell, e} \ge c_{\ell, e}$ everywhere in~\eqref{eq:dp_pad} and dummy tokens carry gate weight $0$, Stages~2 and~3 are exact algebraic isometries on model outputs ($0.0000$ perplexity impact), leaving only Stage~1's bounded margin swap in~\eqref{eq:margin_gumbel} while keeping every kernel inside the first hardware tile.
 
 \begin{theorem}[\OD{} Privacy, Mutual Information Cap, and Perplexity Bound]\label{thm:dp_bound}
@@ -282,7 +283,7 @@ After Stage~2 shadow capping and Stage~3 convex leveling $(1 - \alpha_\epsilon) 
 \emph{Hardware and Models:} All experiments run locally on an Apple M5 Pro workstation ($48.0~\mathrm{GB}$ unified memory, Metal Performance Shaders $\mathrm{FP16}$, Python $3.11.15$, PyTorch $2.15.0$, \texttt{transformers} $5.22.1$). To test generalization across MoE routing architectures within $48~\mathrm{GB}$ RAM without swap contention, we load and evaluate two distinct open-weight MoE models sequentially, freeing GPU memory via \texttt{torch.mps.empty\_cache()} between runs:
 \begin{enumerate}
   \item \textbf{\texttt{allenai/OLMoE-1B-7B-0924-Instruct}~\cite{muennighoff2025olmoe}:} $6.9\mathrm{B}$ total / $1.3\mathrm{B}$ active parameters ($13.85~\mathrm{GB}$ $\mathrm{FP16}$), $L=16$ MoE layers, $E=64$ routed experts per layer ($H=2048$, $I=1024$), unnormalized full-vocabulary $\text{top-}8$ softmax routing, partitioned across $P=8$ Expert Ranks ($8$ experts/rank).
-  \item \textbf{\texttt{ibm-granite/granite-3.1-1b-a400m-instruct}~\cite{gale2023megablocks}:} $1.3\mathrm{B}$ total / $400\mathrm{M}$ active parameters ($2.67~\mathrm{GB}$ $\mathrm{FP16}$), $L=24$ MoE layers, $E=32$ fine-grained MegaBlocks routed experts per layer ($H=1024$, $I=512$), Mixtral-style top-$k$-renormalized $\text{top-}8$ routing with residual scaling, partitioned across $P=8$ Expert Ranks ($4$ experts/rank).
+  \item \textbf{\texttt{ibm-granite/\allowbreak granite-3.1-1b-a400m-instruct}~\cite{gale2023megablocks}:} $1.3\mathrm{B}$ total / $400\mathrm{M}$ active parameters ($2.67~\mathrm{GB}$ $\mathrm{FP16}$), $L=24$ MoE layers, $E=32$ fine-grained MegaBlocks routed experts per layer ($H=1024$, $I=512$), Mixtral-style top-$k$-renormalized $\text{top-}8$ routing with residual scaling, partitioned across $P=8$ Expert Ranks ($4$ experts/rank).
 \end{enumerate}
 
 \emph{Zero-Length-Leakage Benchmark (\MLB{}):} A critical pitfall in side-channel evaluations is inadvertently classifying categories from prompt token length rather than expert routing patterns. We construct \MLB{} with a strict constant-length invariant: every query exceeds $68$ tokens and is truncated to an identical $B_{\mathrm{vic}} = 64$-token micro-batch window, emitting identically $L \cdot B_{\mathrm{vic}} \cdot k$ expert activations ($8{,}192$ on \texttt{OLMoE}; $12{,}288$ on \texttt{Granite-3.1-MoE}) for every single query ($0.00~\mathrm{bits}$ of total-load or length leakage). \MLB{} comprises two tiers:
