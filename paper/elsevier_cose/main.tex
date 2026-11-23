@@ -1,0 +1,517 @@
+\documentclass[final,5p,times,twocolumn]{elsarticle}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb,amsfonts,amsthm}
+\usepackage{mathtools}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage{url}
+\def\UrlBreaks{\do\/\do-\do\_\do.}
+\usepackage[hidelinks]{hyperref}
+\pdfstringdefDisableCommands{%
+  \def\SM{SonarMoE}%
+  \def\OD{OblivDispatch}%
+}
+
+\graphicspath{{figures/}}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+\newtheorem{corollary}{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\theoremstyle{remark}
+\newtheorem{remark}{Remark}
+
+\newcommand{\SM}{\textsc{SonarMoE}}
+\newcommand{\OD}{\textsc{OblivDispatch}}
+\newcommand{\MLB}{\textsc{MoELeak-Bench}}
+
+\journal{Computers \& Security}
+
+\begin{document}
+
+\begin{frontmatter}
+
+\title{SonarMoE: Remote Prompt and Tool-Schema Reconstruction via Expert Contention in Disaggregated MoE Serving and Differentially Private Mitigation}
+
+\author[1]{Mohammed Kamran Syed\corref{cor1}}
+\ead{mohammedkamran.syed@ieee.org}
+\cortext[cor1]{Corresponding author. ORCID: 0009-0009-9058-5375.}
+
+\author[2]{Anudeep Rentala}
+\ead{anudeep.rentala@ieee.org}
+
+\author[2]{Somesh Rahul}
+\ead{someshrahul@ieee.org}
+
+\author[3]{Raghuram Malpe Pai}
+\ead{raghuram.pai@ieee.org}
+
+\author[3]{Krishna Suman Dara}
+\ead{krishna-suman.dara@ieee.org}
+
+\affiliation[1]{organization={Independent Researcher},
+                city={Mountain House},
+                state={CA},
+                country={USA}}
+
+\affiliation[2]{organization={Independent Researcher},
+                city={Fremont},
+                state={CA},
+                country={USA}}
+
+\affiliation[3]{organization={Independent Researcher},
+                city={Sunnyvale},
+                state={CA},
+                country={USA}}
+
+\begin{abstract}
+Production Mixture-of-Experts serving clusters increasingly disaggregate stateful Attention frontends from shared Expert-Parallel feed-forward pools. Cloud operators treat Attention-FFN Disaggregation as isolated against cross-tenant inference leaks because tenants run on separate Attention containers with zero shared Key-Value cache memory and zero host co-residency. We show that an external adversary holding only a standard streaming HTTP API key can still infer co-scheduled victim prompt domains and Model Context Protocol tool schemas through shared expert contention. Our attack, SonarMoE, synthesizes rank-concentrated canary tokens offline from public router weights without victim data and sizes canary micro-batches right below discrete GPU matrix-multiply tile cliffs. Co-scheduled victim tokens routed to a primed expert push execution into an additional hardware tile, producing microsecond Inter-Token Latency echoes observable over streamed HTTP responses. Using single-GPU Apple M5 Pro FP16 kernel profiling, hardware-grounded AFD simulation across synthetic network jitter, and live localhost HTTP/1.1 SSE verification on OLMoE-1B-7B and Granite-3.1-MoE under strict constant-length controls, SonarMoE reaches 87.0 percent five-domain accuracy and 90.0 percent Top-1 accuracy across twenty MCP tool schemas. Our defense, OblivDispatch, combines per-tenant shadow-expert overflow with shifted two-sided Gaussian count blinding inside barrier slack, reducing attacker accuracy to random guessing at 2.3 to 8.9 percent latency overhead.
+\end{abstract}
+
+\begin{keyword}
+Mixture-of-Experts \sep Disaggregated LLM serving \sep Remote timing side channels \sep Model Context Protocol \sep Differential privacy \sep GPU tile quantization
+\end{keyword}
+
+\end{frontmatter}
+
+% ============================================================================
+\section{Introduction}\label{sec:intro}
+% ============================================================================
+
+Sparse Mixture-of-Experts (MoE) transformers decouple parameter count from per-token arithmetic by activating a small top-$k$ subset of specialized feed-forward networks (FFNs) for each token~\cite{shazeer2017outrageously,fedus2022switch}. Frontier open-weight models including \texttt{DeepSeek-V2/V3/R1}~\cite{deepseek2024v2,deepseek2025v3,deepseek2025r1}, \texttt{Qwen2-MoE}~\cite{yang2024qwen2moe}, \texttt{Mixtral}~\cite{jiang2024mixtral}, and \texttt{OLMoE}~\cite{muennighoff2025olmoe} route each token to $2$--$8$ experts out of $32$--$256$ candidates per layer, leading individual experts to specialize sharply around clinical terminology, SQL syntax, financial tool schemas, cryptographic code, or legal clauses~\cite{dai2024deepseekmoe}.
+
+Serving large MoE models economically at cloud scale requires high batch utilization on expert weights without inflating Attention Key-Value (KV) memory~\cite{kwon2023vllm,zheng2024sglang,zhong2024distserve,patel2024splitwise}. Modern serving stacks adopt \emph{Attention--FFN Disaggregation (AFD)}, exemplified by \texttt{MegaScale-Infer}~\cite{zhu2025megascaleinfer} and \texttt{DeepEP}~\cite{zhao2025deepep}. Under AFD, Tenant~A (such as a hospital clinical assistant or enterprise fintech agent) executes self-attention on Dedicated Attention Server~1 with an isolated KV cache, while Tenant~B (an ordinary external API subscriber) executes self-attention on Attention Server~2. At every MoE layer, however, both Attention servers dispatch their post-attention hidden vectors across the datacenter network into the \emph{same shared pool of Expert-Parallel (EP) GPUs} so the cluster can amortize the memory footprint of $64$--$256$ experts.
+
+Cloud operators treat AFD clusters as resistant to known LLM side channels because existing attacks fail across disaggregated node boundaries. Prefix-cache probing attacks such as \texttt{PROMPTPEEK}~\cite{wu2025promptpeek} and \texttt{InputSnatch}~\cite{zheng2025inputsnatch} rely on cross-tenant KV or semantic cache hits and leak zero bits when tenants run on separate Attention servers with disabled cross-tenant KV sharing. Hardware microarchitectural attacks such as \texttt{MoEcho}~\cite{ding2025moecho} require co-resident execution on the victim's physical host to mount CPU Pageout+Reload, GPU TLB Evict+Reload, or performance-counter probes, none of which are accessible to an external HTTP API client. Encrypted packet-size attacks such as \texttt{Whisper Leak}~\cite{microsoft2025whisperleak} require a network man-in-the-middle observer on the victim's own network path, and white-box gate attacks~\cite{patel2026routingmembership} require the server to return raw router telemetry in API responses.
+
+In this paper, we demonstrate that standard remote HTTP streaming timestamps alone expose tenant routing identity when disaggregated Attention frontends share an Expert pool. When Victim~A and Attacker~B co-dispatch tokens to shared Expert Ranks $p \in \{1, \dots, P\}$, each rank executes grouped or per-expert matrix multiplications (\texttt{GEMM}s) whose hardware latency is a piecewise-constant step function of co-batched token count due to GPU SIMD/Tensor-Core wave quantization~\cite{gale2023megablocks,tan2025gpugemmcliff}. On an Apple M5 Pro GPU executing \texttt{OLMoE-1B-7B} $\mathrm{FP16}$ expert MLPs, increasing an expert's batch size from $N=64$ to $N=65$ shifts latency by only $+3.43~\mu\mathrm{s}$, whereas crossing the hardware tile boundary from $N=128$ to $N=129$ triggers a discrete $+27.71~\mu\mathrm{s}$ jump per expert ($+443~\mu\mathrm{s}$ across $16$ layers). In addition, standard sparse MoE kernels skip launching experts that receive zero tokens ($0~\mu\mathrm{s}$ vs.\ $72$--$90~\mu\mathrm{s}$), creating a second physical timing discontinuity.
+
+We introduce \SM{}, a remote active probing framework. Without inspecting any victim prompts, \SM{} screens the public MoE vocabulary offline using D-optimal experimental design and rank-straggler margin maximization to construct a compact codebook of single-token \emph{Canary Probes}. Repeating a chosen canary token $N_{\mathrm{can}} = M_{\mathrm{tile}} - \delta$ times on Attacker~B's isolated Attention Server~2 deterministically routes all $N_{\mathrm{can}}$ copies to a small subset of experts across layers, priming those experts right below the $M_{\mathrm{tile}} = 128$ hardware cliff while steering the cross-rank combine bottleneck onto a target Expert Rank $p^*$. Whenever Victim~A's co-scheduled prefill chunk routes $\ge \delta + 1$ tokens to those domain-specialized experts, Attacker~B's streamed HTTP token experiences a macroscopic Inter-Token Latency ($\mathrm{ITL}$) echo that survives realistic additive network jitter.
+
+Closing this side channel without destroying MoE throughput is nontrivial: worst-case static padding across all $E$ experts multiplies FFN compute by $4\times$--$8\times$, while naive router noise degrades language-modeling perplexity ($\mathrm{PPL}$). We design \OD{}, a strictly per-tenant $(\epsilon, \delta)$-differentially private dispatcher built on \emph{Straggler-Slack Hiding}. In undefended $\text{top-}k$ MoE serving, the synchronous combine barrier $\max_{p} T_{\mathrm{rank}}(\ell, p)$ already waits for the most heavily loaded rank, leaving lighter ranks idle at the barrier for $180$--$320~\mu\mathrm{s}$ per layer. Before cross-tenant coalescing, \OD{} caps Victim~A's hot-expert loads by redirecting overflow onto Victim~A's own lightest local slots, closes the kernel-skip channel with a data-independent $N_{\min} = 1$ occupancy floor, and blinds per-expert token counts via a sound shifted two-sided Gaussian mechanism with data-independent clipping $[N_{\min}, N_{\max}]$ and split failure budget $\delta = \delta_{\mathrm{zCDP}} + \delta_{\mathrm{tail}}$, paired with probability-margin-bounded tail router jitter.
+
+We evaluate \SM{} and \OD{} on real open-weight MoE models (\texttt{allenai/OLMoE-1B-7B-0924-Instruct} with unnormalized $\text{top-}8$ routing across $64$ experts, and \texttt{ibm-granite/\allowbreak granite-3.1-1b-a400m-instruct} with Mixtral/MegaBlocks normalized $\text{top-}8$ routing across $32$ experts and $24$ layers) via single-GPU Apple M5 Pro $\mathrm{FP16}$ kernel profiling, hardware-grounded AFD simulation across synthetic Gaussian jitter $\sigma_{\mathrm{net}} \in \{10, 50, 200\}~\mu\mathrm{s}$, and a live multi-endpoint \texttt{127.0.0.1} \texttt{TCP\_NODELAY} HTTP/1.1 Server-Sent Events (SSE) loopback harness. Every benchmark query in our two-tier \MLB{} suite ($100$ sensitive enterprise prompts across $5$ domains and $160$ JSON-RPC prefill invocations across $20$ Model Context Protocol~\cite{anthropic2024mcp,patil2024bfcl} tool schemas) is truncated to an identical $B_{\mathrm{vic}} = 64$ tokens, guaranteeing $0.00~\mathrm{bits}$ of prompt-length leakage.
+
+Our contributions are fourfold:
+\begin{enumerate}
+  \item \textbf{Disaggregated Expert-Contention Channel and Capacity Theory:} We formalize remote timing leakage across shared Expert pools and prove \emph{Theorem~\ref{thm:capacity}}, quantifying how tile-boundary canary sizing ($N_{\mathrm{can}} = M_{\mathrm{tile}} - \delta$) amplifies single-probe mutual information capacity by $2.9\times$--$17.8\times$ over uncalibrated within-tile probing under additive network jitter ($\sigma_{\mathrm{net}} \in [50, 200]~\mu\mathrm{s}$).
+  \item \textbf{Blind Rank-Concentrated Canary Synthesis and Deconvolution (\SM{}):} We develop a domain-agnostic vocabulary profiler and common-mode-rejected matched-filter/MLP deconvolver. In hardware-grounded AFD simulation on \texttt{OLMoE-1B-7B} under zero length leakage, \SM{} achieves $87.0 \pm 7.6\%$ blind $5$-domain accuracy ($\sigma_{\mathrm{net}} = 50~\mu\mathrm{s}$) and $90.0 \pm 3.5\%$ Top-1 ($94.4 \pm 1.3\%$ Top-3) accuracy across $20$ MCP tool schemas ($\sigma_{\mathrm{net}} = 10~\mu\mathrm{s}$; $87.5\%$ Top-1 vs.\ $40.6\%$ for naive $N=16$ canaries at $\sigma_{\mathrm{net}} = 50~\mu\mathrm{s}$).
+  \item \textbf{Sound Per-Tenant \OD{} and Straggler-Slack Hiding:} We prove \emph{Theorem~\ref{thm:dp_bound}}, establishing $(\epsilon, \delta)$-DP via a shifted two-sided Gaussian mechanism with data-independent clipping and split tail accounting ($\delta = \delta_{\mathrm{zCDP}} + \delta_{\mathrm{tail}}$), bounding end-to-end mutual information via $\rho$-zCDP and perplexity shift via probability-margin sensitivity. Empirically across $3$ seeds, \OD{} drives $5$-domain accuracy to the $20.0\%$ random floor ($19.0\%$--$23.0\%$ at $\epsilon \in [1.0, 8.0]$, zero underflow slots) and $20$-way MCP Top-1 accuracy to $1.3\%$--$6.3\%$ (random floor $5.0\%$, $\le 0.065~\mathrm{bits}$ permutation-calibrated MI) at $+2.33\%$--$+2.42\%$ TPOT overhead on \texttt{Granite-3.1-MoE} and $+7.94\%$--$+8.93\%$ on \texttt{OLMoE-1B-7B}.
+  \item \textbf{\MLB{} and Live Localhost HTTP/1.1 SSE Verification:} We release \MLB{} ($260$ constant-length prompts and MCP tool calls plus a named $8$-passage perplexity corpus) and verify \SM{} and \OD{} end-to-end over $12{,}928$ live loopback TCP/HTTP-1.1 chunked SSE frames executing real MPS GPU expert kernels.
+\end{enumerate}
+
+The remainder of this paper is organized as follows. Section~\ref{sec:background} reviews sparse MoE routing and AFD combine barriers. Section~\ref{sec:threat} defines our remote threat model. Section~\ref{sec:attack} develops \SM{} and proves Theorem~\ref{thm:capacity}. Section~\ref{sec:defense} presents \OD{} and proves Theorem~\ref{thm:dp_bound}. Sections~\ref{sec:methodology} and~\ref{sec:eval} describe \MLB{} and our hardware evaluation, followed by related work in Section~\ref{sec:related}, limitations in Section~\ref{sec:discussion}, and conclusions in Section~\ref{sec:conclusion}.
+
+% ============================================================================
+\section{Background and Disaggregated MoE Serving}\label{sec:background}
+% ============================================================================
+
+\subsection{Sparse Top-$k$ Routing Semantics}
+Consider an $L$-layer MoE transformer with hidden dimension $H$, vocabulary $\mathcal{V}$, and $E$ routed experts per layer. Given post-attention normalized hidden state $h_{\ell, u} \in \mathbb{R}^H$ for token $u$ at layer $\ell \in \{0, \dots, L-1\}$, the router computes gate logits $z_{\ell, u} = W_{\mathrm{gate}}^{(\ell)} h_{\ell, u} \in \mathbb{R}^E$. Modern open-weight MoE families instantiate two top-$k$ normalization conventions:
+\begin{enumerate}
+  \item \emph{Full-Vocabulary Softmax Routing (\texttt{OLMoE}, \texttt{Qwen-MoE}):} Probabilities $p_{\ell, u} = \mathrm{softmax}(z_{\ell, u})$ are computed over all $E$ experts first, and the router selects index set $\mathcal{S}_{\ell, u} = \mathrm{TopK}(p_{\ell, u}, k)$ without renormalizing ($\sum_{e \in \mathcal{S}_{\ell, u}} p_{\ell, u, e} < 1$)~\cite{muennighoff2025olmoe,yang2024qwen2moe}.
+  \item \emph{Top-$k$ Renormalized Routing (\texttt{Mixtral}, \texttt{Granite-MoE}):} The router selects $\mathcal{S}_{\ell, u} = \mathrm{TopK}(z_{\ell, u}, k)$ and normalizes weights strictly across the active subset via $w_{\ell, u, e} = \exp(z_{\ell, u, e}) / \sum_{j \in \mathcal{S}_{\ell, u}} \exp(z_{\ell, u, j})$~\cite{jiang2024mixtral,gale2023megablocks}.
+\end{enumerate}
+Each selected expert $e \in \mathcal{S}_{\ell, u}$ evaluates a gated SwiGLU MLP:
+\begin{equation}\label{eq:swiglu}
+  f_{\ell, e}(h) = W_{\mathrm{down}}^{(\ell, e)} \Big( \mathrm{SiLU}\!\big(W_{\mathrm{gate}}^{(\ell, e)} h\big) \odot \big(W_{\mathrm{up}}^{(\ell, e)} h\big) \Big),
+\end{equation}
+and the layer output accumulates $\sum_{e \in \mathcal{S}_{\ell, u}} w_{\ell, u, e} f_{\ell, e}(h_{\ell, u})$ using the SwiGLU operator in~\eqref{eq:swiglu}.
+
+\subsection{Attention--FFN Disaggregation (AFD)}
+In conventional colocated serving, replicating $E = 64$--$256$ expert MLPs across small decode batches leaves expert HBM bandwidth severely underutilized, while large batches exhaust KV-cache capacity~\cite{zhu2025megascaleinfer}. AFD resolves this tension by splitting inference into two pools connected via RoCEv2 or InfiniBand RDMA (\texttt{DeepEP}~\cite{zhao2025deepep}):
+\begin{itemize}
+  \item \emph{Isolated Attention Frontends:} Tenant requests are pinned to separate Attention replicas. Each replica maintains tenant-local paged KV caches~\cite{kwon2023vllm}, computes causal self-attention and router top-$k$ indices $\mathcal{S}_{\ell, u}$, and transmits tuples $(h_{\ell, u}, \mathcal{S}_{\ell, u})$ to the Expert Pool.
+  \item \emph{Shared Expert-Parallel Backend:} The $E$ experts at layer $\ell$ are partitioned across $P$ Expert Ranks, where Rank $p \in \{0, \dots, P-1\}$ hosts local subset $\mathcal{E}_p$ of size $E_{\mathrm{loc}} = E / P$. During micro-batch tick $t$, Rank $p$ coalesces incoming hidden vectors from all co-scheduled Attention frontends destined for each $e \in \mathcal{E}_p$, executes the corresponding expert \texttt{GEMM}s, and returns output vectors via an RDMA \texttt{combine} operation.
+\end{itemize}
+
+Two combine synchronization modes appear in deployed AFD engines. Under a \emph{Global Synchronous Barrier} (standard collective all-to-all combine), all Attention frontends participating in tick $t$ wait for the slowest Expert Rank across the entire pool, incurring layer delay $\max_{p \in \{0, \dots, P-1\}} T_{\mathrm{rank}}(\ell, p)$. Under \emph{Selective Asynchronous Combine} (\texttt{DeepEP} low-latency GPUDirect RDMA / IBGDA~\cite{zhao2025deepep}), an Attention frontend waiting on a specific request completes as soon as the subset of ranks $\mathcal{P}_{\ell} \subseteq \{0, \dots, P-1\}$ referenced by its dispatched tokens returns completions, incurring $\max_{p \in \mathcal{P}_{\ell}} T_{\mathrm{rank}}(\ell, p)$. We analyze and evaluate both modes, treating the stricter Global Synchronous Barrier as our primary conservative baseline.
+
+\subsection{GPU Tile Quantization and Zero-Token Kernel Skipping}
+Let $N_{\ell, e}(t) = N_{\ell, e}^{\mathrm{vic}}(t) + N_{\ell, e}^{\mathrm{can}}(t)$ denote the total co-batched tokens routed to expert $e \in \mathcal{E}_p$ in tick $t$. Sparse MoE runtimes exhibit two discrete hardware nonlinearities:
+\begin{enumerate}
+  \item \emph{Zero-Token Kernel Skipping:} As implemented in standard PyTorch/Transformers, \texttt{vLLM}, and \texttt{SGLang} dispatchers (\texttt{expert\_hit = nonzero(counts > 0)}), if $N_{\ell, e}(t) = 0$, the runtime issues zero GPU kernel launches for expert $e$. Moving from $N_{\ell, e} = 0$ to $N_{\ell, e} = 1$ incurs fixed kernel launch and weight-fetch latency $\tau_{\mathrm{launch}} > 0$ ($78$--$95~\mu\mathrm{s}$ on M5 Pro $\mathrm{FP16}$ for \texttt{OLMoE}).
+  \item \emph{Hardware Tile-Boundary Stepping:} For $N_{\ell, e}(t) \ge 1$, GPU matrix-multiply kernels partition the token dimension $M = N_{\ell, e}(t)$ into fixed hardware threadgroup tiles of height $M_{\mathrm{tile}}$ (typically $64$ or $128$)~\cite{tan2025gpugemmcliff}. Within a single tile ($1 \le N_{\ell, e} \le M_{\mathrm{tile}}$), weight matrices $W_{\mathrm{gate/up}}^{(\ell, e)}$ and $W_{\mathrm{down}}^{(\ell, e)}$ are streamed from HBM/SLC once and arithmetic lanes are amortized in parallel, producing a nearly flat slope $\alpha_{\mathrm{in}} \ll 1~\mu\mathrm{s}/\text{token}$. Crossing $N_{\ell, e} = m M_{\mathrm{tile}} + 1$ forces a second wave of weight-tile reads and threadgroup dispatches, adding discrete step $\Delta_{\mathrm{tile}} \gg \alpha_{\mathrm{in}}$:
+\end{enumerate}
+\begin{equation}\label{eq:piecewise_latency}
+  T_{\mathrm{exp}}(N) = \mathbb{I}[N > 0] \left( \tau_{\mathrm{base}} + \alpha_{\mathrm{in}} N + \Delta_{\mathrm{tile}} \left\lfloor \frac{N - 1}{M_{\mathrm{tile}}} \right\rfloor \right) + \xi_{\mathrm{gpu}},
+\end{equation}
+where $\xi_{\mathrm{gpu}}$ denotes sub-microsecond hardware execution jitter.
+
+\begin{table*}[t]
+  \centering
+  \caption{Comparison of \SM{} Against Closest 2024--2026 LLM Side-Channel and MoE Security Prior Art.}
+  \label{tab:prior_art}
+  \renewcommand{\arraystretch}{1.12}
+  \resizebox{\textwidth}{!}{%
+  \begin{tabular}{lcccccc}
+    \toprule
+    \textbf{Attack / Study} & \textbf{Security Goal} & \textbf{Zero Host / Counter Access} & \textbf{Zero Shared KV / Prefix Cache} & \textbf{Zero Victim Link Sniffing} & \textbf{Black-Box HTTP API Only} & \textbf{Formal DP Defense Included} \\
+    \midrule
+    \texttt{PROMPTPEEK} (NDSS'25)~\cite{wu2025promptpeek} & Confidentiality & \checkmark & $\times$ (Needs shared KV) & \checkmark & \checkmark & $\times$ \\
+    \texttt{InputSnatch} (USENIX'25)~\cite{zheng2025inputsnatch} & Confidentiality & \checkmark & $\times$ (Needs semantic cache) & \checkmark & \checkmark & $\times$ \\
+    \texttt{Whisper Leak} (2025)~\cite{microsoft2025whisperleak} & Confidentiality & \checkmark & \checkmark & $\times$ (Needs TLS MITM) & $\times$ & $\times$ \\
+    \texttt{MoEcho} (ACM CCS'25)~\cite{ding2025moecho} & Confidentiality & $\times$ (Local CPU/GPU TLB) & \checkmark & \checkmark & $\times$ & $\times$ \\
+    Routing Membership (PoPETs'26)~\cite{patel2026routingmembership} & Confidentiality & \checkmark & \checkmark & \checkmark & $\times$ (Needs gate logs) & $\times$ \\
+    Trigger the Straggler (2026)~\cite{liu2026straggler} & Availability (DoS) & \checkmark & \checkmark & \checkmark & \checkmark & $\times$ \\
+    \midrule
+    \textbf{\SM{} + \OD{} (Ours)} & \textbf{Confidentiality + DP} & \textbf{\checkmark} & \textbf{\checkmark} & \textbf{\checkmark} & \textbf{\checkmark} & \textbf{\checkmark\ ($(\epsilon,\delta)$-DP)} \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table*}
+
+% ============================================================================
+\section{Threat Model and Prior-Art Differentiation}\label{sec:threat}
+% ============================================================================
+
+\emph{System Model:} A cloud provider operates a multi-tenant AFD cluster serving a known open-weight MoE model (such as \texttt{OLMoE}, \texttt{DeepSeek-V2/V3}, \texttt{Qwen-MoE}, or \texttt{Granite-MoE}). Cross-tenant KV-cache sharing and semantic prompt caching are strictly disabled. Victim~A and Attacker~B are scheduled onto physically separate Attention frontend instances (Attention Server~1 and Attention Server~2) that dispatch hidden states to a shared $P$-rank Expert GPU pool.
+
+\emph{Adversary Capabilities:} Attacker~B is an unprivileged external customer holding a standard commercial HTTP/HTTPS streaming API key (\texttt{text/event-stream} SSE). Attacker~B has \emph{zero} code-execution, container, OS, CPU cache, GPU TLB, or performance-counter access on any cluster node; \emph{zero} access to Victim~A's network link or TLS ciphertexts; and \emph{zero} access to router logits or expert load telemetry in API responses. Attacker~B can submit ordinary token sequences to Attention Server~2 and record client-side arrival timestamps $t_0, t_1, \dots, t_R$ of streamed response chunks at microsecond resolution using standard monotonic clocks (\texttt{clock\_gettime} / \texttt{perf\_counter\_ns}), yielding observed Inter-Token Latencies $\mathrm{ITL}_r = t_r - t_{r-1}$ corrupted by additive network and OS scheduling jitter $\eta_r \sim \mathcal{N}(0, \sigma_{\mathrm{net}}^2)$.
+
+\emph{Adversary Goal:} While Victim~A processes a confidential enterprise prompt or invokes an internal Model Context Protocol (MCP) tool schema (such as \texttt{stripe\_issue\_refund}, \texttt{fhir\_patient\_medication\_order}, or \texttt{kms\_aes\_gcm\_envelope\_seal}), Attacker~B aims to infer Victim~A's semantic domain or exact invoked MCP tool class $Y \in \{1, \dots, K\}$ purely from streamed canary $\Delta\mathrm{ITL}$ observations, even when all victim requests have identical token length $B_{\mathrm{vic}}$ so total cluster load carries zero class information. Table~\ref{tab:prior_art} summarizes how this threat model strictly separates \SM{} from all five closest $2025$--$2026$ studies~\cite{wu2025promptpeek,zheng2025inputsnatch,microsoft2025whisperleak,ding2025moecho,patel2026routingmembership,liu2026straggler}.
+
+% ============================================================================
+\section{SonarMoE Remote Contention Attack}\label{sec:attack}
+% ============================================================================
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.88\textwidth]{fig1_tile_cliff_capacity.pdf}
+  \caption{Empirical hardware tile quantization and analytical side-channel capacity. (a) Measured Apple M5 Pro MPS $\mathrm{FP16}$ per-expert MLP latency across co-batched token counts $N \in [1, 192]$ on real \texttt{OLMoE-1B-7B} and \texttt{Granite-3.1-MoE} weights, revealing a sharp hardware tile step at $N = 128 \to 129$ right above the $N_{\mathrm{can}} = 122$ priming zone. (b) Exact per-probe side-channel capacity under Theorem~\ref{thm:capacity} across network jitter $\sigma_{\mathrm{net}} \in [5, 400]~\mu\mathrm{s}$ ($R=6$ streamed tokens).}
+  \label{fig:tile_cliff}
+\end{figure*}
+
+\subsection{Tile-Boundary Channel Amplification Theory}
+Suppose Attacker~B streams $R$ tokens for Canary Probe $c_m$ while Victim~A dispatches a $B_{\mathrm{vic}}$-token chunk. On Expert Rank $p$, execution latency at layer $\ell$ sums over local experts:
+\begin{equation}\label{eq:rank_lat}
+  T_{\mathrm{rank}}(\ell, p) = \sum_{e \in \mathcal{E}_p} T_{\mathrm{exp}}\!\left(N_{\ell, e}^{\mathrm{vic}} + N_{\ell, e}^{\mathrm{can}}(c_m)\right).
+\end{equation}
+Under a global synchronous combine barrier over~\eqref{eq:rank_lat}, two obstacles confront a naive attacker who sends a short canary sequence ($N_{\mathrm{can}} \ll M_{\mathrm{tile}}$). First, if Victim~A's prompt creates a hot straggler on some rank $q \neq p^*$, then $\max_p T_{\mathrm{rank}}(\ell, p)$ locks onto Rank~$q$ across every probe $m$, masking local variations on Rank~$p^*$. Second, even when Rank~$p^*$ wins the barrier maximum, small canary counts sit on the flat interior of a hardware tile where adding $\Delta N_{\mathrm{vic}}$ victim tokens shifts latency by only $\alpha_{\mathrm{in}} \Delta N_{\mathrm{vic}}$.
+
+\SM{} overcomes both obstacles simultaneously through \emph{Straggler-Pinning Tile-Boundary Priming}. By selecting a canary token sequence of length $N_{\mathrm{can}} = M_{\mathrm{tile}} - \delta$ (e.g., $122$ tokens for $M_{\mathrm{tile}} = 128$, $\delta = 6$) whose routed experts concentrate onto Target Rank $p^*$, Probe $c_m$ (i) elevates $T_{\mathrm{rank}}(\ell, p^*)$ above competing ranks so $\arg\max_p T_{\mathrm{rank}}(\ell, p) = p^*$, and (ii) positions every saturated canary expert right below the discrete $M_{\mathrm{tile}}$ cliff so any victim domain with $N_{\ell, e}^{\mathrm{vic}} > \delta$ triggers a full $\Delta_{\mathrm{tile}}$ step jump across each matching layer.
+
+\begin{theorem}[Tile-Stepping Side-Channel Capacity Amplification]\label{thm:capacity}
+Let binary random variable $B \sim \mathrm{Bernoulli}(1/2)$ indicate whether Victim~A activates a target domain expert subset across $L_{\mathrm{hit}}$ layers with per-layer victim token count $N_{\mathrm{vic}} > \delta$ ($B=1$) versus $N_{\mathrm{vic}} \le \delta$ ($B=0$). Suppose Attacker~B averages $R$ streamed canary ITL samples under independent Gaussian network jitter $\eta_r \sim \mathcal{N}(0, \sigma_{\mathrm{net}}^2)$, yielding effective noise $\sigma_{\mathrm{eff}} = \sigma_{\mathrm{net}} / \sqrt{R}$.
+\begin{enumerate}
+  \item Under Tile-Boundary Priming ($N_{\mathrm{can}} = M_{\mathrm{tile}} - \delta$), the differential contention echo is $\Delta \mu_{\mathrm{tile}} = L_{\mathrm{hit}}(\Delta_{\mathrm{tile}} + \alpha_{\mathrm{in}} N_{\mathrm{vic}})$, achieving exact mutual information capacity
+  \begin{align}\label{eq:cap_tile}
+    C_{\mathrm{tile}} &= 1 - \mathbb{E}_{Z}\!\Bigg[ \log_2\!\Bigg(1 \nonumber\\
+    &\qquad + \exp\!\left(-\frac{\Delta\mu_{\mathrm{tile}}^2 + 2\sigma_{\mathrm{eff}}\Delta\mu_{\mathrm{tile}} Z}{2\sigma_{\mathrm{eff}}^2}\right)\Bigg) \Bigg],
+  \end{align}
+  where $Z \sim \mathcal{N}(0, 1)$, which satisfies $C_{\mathrm{tile}} \ge 1 - H_2\!\big(\Phi(-\sqrt{R}\,\Delta\mu_{\mathrm{tile}} / (2\sigma_{\mathrm{net}}))\big)$ bits per probe.
+  \item Under uncalibrated within-tile probing ($1 \le N_{\mathrm{can}} + N_{\mathrm{vic}} \le M_{\mathrm{tile}}$), the echo shrinks to $\Delta\mu_{\mathrm{naive}} = L_{\mathrm{hit}} \alpha_{\mathrm{in}} N_{\mathrm{vic}}$, and in the moderate-to-high jitter regime ($\sigma_{\mathrm{eff}} \gg \Delta\mu_{\mathrm{naive}}$), capacity decays quadratically:
+  \begin{equation}\label{eq:cap_naive}
+    C_{\mathrm{naive}} = \frac{R \, L_{\mathrm{hit}}^2 \, \alpha_{\mathrm{in}}^2 \, N_{\mathrm{vic}}^2}{8 \ln 2 \, \sigma_{\mathrm{net}}^2} + \mathcal{O}\!\left(\frac{\Delta\mu_{\mathrm{naive}}^4}{\sigma_{\mathrm{eff}}^4}\right).
+  \end{equation}
+\end{enumerate}
+\end{theorem}
+
+\begin{proof}
+Averaging $R$ conditionally independent observations $Y_r = \mu_B + \eta_r$ yields sufficient statistic $\bar{Y} = \mu_B + \bar{\eta}$ with $\bar{\eta} \sim \mathcal{N}(0, \sigma_{\mathrm{eff}}^2)$ where $\sigma_{\mathrm{eff}} = \sigma_{\mathrm{net}}/\sqrt{R}$. Writing $\mu_1 - \mu_0 = \Delta\mu$, translation invariance gives $I(B; \bar{Y}) = H(\bar{Y}) - H(\bar{Y} \mid B)$. Under $B=0$, $\bar{Y} = \sigma_{\mathrm{eff}} Z$ with $Z \sim \mathcal{N}(0,1)$, and the likelihood ratio between $f_{\bar{Y}\mid B=0}$ and the mixture $f_{\bar{Y}}(y) = \frac{1}{2} f_0(y) + \frac{1}{2} f_1(y)$ equals $2 / (1 + \exp((2 y \Delta\mu - \Delta\mu^2)/(2\sigma_{\mathrm{eff}}^2)))$. Taking expectations under $B \in \{0,1\}$ by symmetry yields~\eqref{eq:cap_tile}. Applying hard-decision threshold $\tau = (\mu_0 + \mu_1)/2$ produces crossover error probability $p_e = \Phi(-\Delta\mu / (2\sigma_{\mathrm{eff}}))$, so the data-processing inequality over binary symmetric channel $\mathrm{BSC}(p_e)$ gives $C_{\mathrm{tile}} \ge 1 - H_2(p_e)$. For within-tile probing where $1 \le N_{\mathrm{can}} \le N_{\mathrm{can}} + N_{\mathrm{vic}} \le M_{\mathrm{tile}}$, the floor term $\lfloor (N-1)/M_{\mathrm{tile}} \rfloor$ in~\eqref{eq:piecewise_latency} vanishes identically for both $B=0$ and $B=1$, leaving $\Delta\mu_{\mathrm{naive}} = L_{\mathrm{hit}} \alpha_{\mathrm{in}} N_{\mathrm{vic}}$. Expanding $I(B; \mu_B + \sigma_{\mathrm{eff}} Z) = \frac{\mathrm{Var}(\mu_B)}{2 \ln 2 \, \sigma_{\mathrm{eff}}^2} + \mathcal{O}(\Delta\mu^4 / \sigma_{\mathrm{eff}}^4)$ with $\mathrm{Var}(\mu_B) = \Delta\mu_{\mathrm{naive}}^2 / 4$ yields~\eqref{eq:cap_naive}.
+\end{proof}
+
+Fig.~\ref{fig:tile_cliff}(b) plots Theorem~\ref{thm:capacity} anchored to our measured \texttt{OLMoE-1B-7B} M5 Pro hardware parameters ($\Delta_{\mathrm{tile}} = 27.71~\mu\mathrm{s}$, $\alpha_{\mathrm{in}} = 0.30~\mu\mathrm{s}/\text{tok}$, $L_{\mathrm{hit}} = 6$, $R = 6$). At $\sigma_{\mathrm{net}} = 50~\mu\mathrm{s}$, a tile-primed canary extracts $0.9999~\mathrm{bits/probe}$ compared to $0.3493~\mathrm{bits/probe}$ for an uncalibrated slope probe ($2.86\times$ capacity gain); at $\sigma_{\mathrm{net}} = 200~\mu\mathrm{s}$ WAN jitter, $C_{\mathrm{tile}}$ retains $0.4977~\mathrm{bits/probe}$ while $C_{\mathrm{naive}}$ collapses to $0.0279~\mathrm{bits/probe}$ ($17.8\times$ gain).
+
+\subsection{Blind Offline Orthogonal Canary Codebook Synthesis}
+To construct a compact $M$-probe Canary Codebook $\mathcal{C} = \{c_1, \dots, c_M\}$ without access to any victim prompts or domain labels, \SM{} runs an offline three-step profiler over public model weights:
+\begin{enumerate}
+  \item \emph{Rank-Concentrated Vocabulary Screening:} Passing the token embedding matrix $W_{\mathrm{emb}} \in \mathbb{R}^{|\mathcal{V}| \times H}$ through Layer~0 normalization and router gate $W_{\mathrm{gate}}^{(0)}$, we score printable non-special tokens $v \in \mathcal{V}$ for each Rank $p \in \{0, \dots, P-1\}$ by combining the count of top-$k$ experts landing in $\mathcal{E}_p$ with total rank probability mass:
+  \begin{equation}
+    s_p(v) = \sum_{e \in \mathcal{E}_p} \mathbb{I}[e \in \mathrm{TopK}(p_{0, v}, k)] + 2 \sum_{e \in \mathcal{E}_p} p_{0, v, e}.
+  \end{equation}
+  \item \emph{Full-Model Multi-Layer Saturation Verification:} Top candidates per rank ($\sim 190$--$220$ tokens) are formatted as repeated length-$N_{\mathrm{can}}$ sequences $c(v) = [v, v, \dots, v]$ and evaluated through all $L$ Transformer layers on Attention Server~2 to record exact multi-layer expert hit fractions $\phi_{\ell, e}(v) \in [0, 1]$ and binary cliff-readiness indicators $a_{\ell, e}(v) = \mathbb{I}[\phi_{\ell, e}(v) \ge 0.85]$. Empirically, repeated single-token prompts achieve $100\%$ concentration ($122/122$ hits) on deterministic 8-expert subsets across all layers.
+  \item \emph{Greedy D-Optimal and Straggler-Margin Selection:} Let $\mathbf{u}(v) \in \mathbb{R}^{L E}$ denote the unit-normalized cliff indicator vector of candidate $v$, and let $r_{\ell, p}(v) = \sum_{e \in \mathcal{E}_p} a_{\ell, e}(v)$ denote its active cliff count on Rank~$p$. Cycling target rank $p^* = m \bmod P$ across $m = 1, \dots, M$, we greedily select candidate $v_m^*$ maximizing
+  \begin{align}\label{eq:d_optimal}
+    \mathcal{J}_m(v) &= \lambda_{\mathrm{det}} \ln\!\left(1 + \mathbf{u}(v)^\top \mathbf{G}_{m-1}^{-1} \mathbf{u}(v)\right) \nonumber\\
+    &\quad + \lambda_{\mathrm{strag}} \frac{1}{L} \sum_{\ell=0}^{L-1} \Big(r_{\ell, p^*}(v) - \max_{q \neq p^*} r_{\ell, q}(v)\Big) \nonumber\\
+    &\quad - \lambda_{\mathrm{cos}} \max_{j < m} \langle \mathbf{u}(v_j^*), \mathbf{u}(v) \rangle,
+  \end{align}
+  updating $\mathbf{G}_m^{-1} = (\sum_{j=1}^m \mathbf{u}(v_j^*)\mathbf{u}(v_j^*)^\top + \gamma \mathbf{I})^{-1}$ in $\mathcal{O}((LE)^2)$ time via Sherman--Morrison rank-one updates.
+\end{enumerate}
+
+\subsection{Temporal Probe Alignment and Deconvolution Decoder}
+\emph{Temporal Co-Scheduling Model:} A single $64$-token victim chunk executes in one forward pass, whereas sweeping $M = 32$ probes sequentially for $R = 6$ tokens each would require $192$ ticks. In practice, enterprise RAG prompts, clinical notes, and multi-turn MCP agent contexts span $1{,}500$--$8{,}000$ tokens, which chunked-prefill schedulers (\texttt{Sarathi-Serve}~\cite{agrawal2024sarathi}, \texttt{DistServe}~\cite{zhong2024distserve}) slice into $24$--$125$ consecutive $B_{\mathrm{vic}} = 64$-token prefill chunks carrying the same domain or tool schema. Moreover, because~\eqref{eq:d_optimal} partitions the $M = 32$ codebook probes evenly across the $P = 8$ Expert Ranks ($4$ probes per rank), under Selective IBGDA Attacker~B can issue up to $P = 8$ rank-disjoint canary streams concurrently per tick without self-collision on the same target rank, completing all $32$ probes in $4 \times R = 24$ ticks (a $1{,}536$-token victim prefill). Under Global Synchronous Barriers, Attacker~B issues probes sequentially across a longer multi-chunk prefill or repeated agentic workflow calls. In our hardware-grounded evaluation, each victim query represents a stationary $B_{\mathrm{vic}} = 64$-token chunk profile observed across all $M = 32$ probes.
+
+\emph{Common-Mode-Rejected Decoder:} Attacker~B records streamed latencies for $c_1, \dots, c_M$ and subtracts pre-measured empty-cluster baselines $\mathrm{ITL}_0(c_m)$ to obtain raw contention vector $\mathbf{d} = [\Delta\mathrm{ITL}_1, \dots, \Delta\mathrm{ITL}_M]^\top \in \mathbb{R}^M$. Because victim prompts also induce small probe-invariant shifts in global barrier time, \SM{} applies common-mode rejection $\tilde{\mathbf{d}} = \mathbf{d} - (\frac{1}{M}\mathbf{1}^\top \mathbf{d})\mathbf{1}$ and feeds $\mathbf{x}_{\mathrm{adv}} = [\mathbf{d}; \tilde{\mathbf{d}}] \in \mathbb{R}^{2M}$ into an ensemble of an $\ell_2$-regularized linear matched filter and a two-layer LayerNorm-GELU MLP trained strictly on standardized training folds to output posterior class probabilities $\hat{\mathbf{p}}(Y \mid \mathbf{x}_{\mathrm{adv}})$.
+
+% ============================================================================
+\section{OblivDispatch Differentially Private Defense}\label{sec:defense}
+% ============================================================================
+
+\subsection{Why Router Noise Alone and Static Padding Fail}
+Defending disaggregated MoE pools against remote contention requires closing \emph{both} physical timing channels in~\eqref{eq:piecewise_latency} simultaneously while keeping serving latency overhead and perplexity shift low. Existing strawman approaches fail this joint constraint:
+\begin{itemize}
+  \item \emph{Pure Router Logit Perturbation:} Replacing top-$k$ experts wholesale via high-variance Gumbel noise corrupts high-weight primary experts ($k \in \{0, \dots, 5\}$), increasing corpus perplexity by $+1.2$ to $+6.8~\mathrm{PPL}$ points in our ablations. Conversely, keeping primary experts intact leaves home-expert batch counts $N_{\ell, e}^{\mathrm{vic}} \in [20, 64]$ exposed to $M_{\mathrm{tile}} = 128$ canary cliffs and leaves $N_{\ell, e}^{\mathrm{vic}} = 0$ exposed to $\tau_{\mathrm{launch}} \approx 85~\mu\mathrm{s}$ kernel-skip leaks.
+  \item \emph{Worst-Case Uniform Dummy Padding:} Padding every expert $e \in \{0, \dots, E-1\}$ to worst-case batch size $B_{\mathrm{vic}}$ increases FFN work from $k B_{\mathrm{vic}}$ to $E B_{\mathrm{vic}}$ ($8\times$ compute inflation on $64$-expert $\text{top-}8$ models), destroying AFD cost efficiency.
+\end{itemize}
+
+\subsection{Per-Tenant Straggler-Slack Hiding and Three-Stage OblivDispatch}
+\OD{} operates \emph{strictly per-tenant} on Victim~A's own Attention frontend dispatch \emph{before} cross-tenant coalescing on the Expert Pool, never inspecting or conditioning on Attacker~B's canary load. It exploits a structural asymmetry we term \emph{Straggler-Slack Hiding}: for a $B_{\mathrm{vic}} = 64$, $\text{top-}8$ micro-batch ($512$ routed activations per layer across $P=8$ ranks), a domain-skewed prompt routes $120$--$195$ activations onto its hottest rank while cold ranks sit idle at the combine barrier for $180$--$320~\mu\mathrm{s}$ per layer. \OD{} repurposes this barrier slack through three stages parameterized by $(\epsilon, \delta)$ (complete schedules in Table~\ref{tab:obliv_params}):
+
+\emph{Stage 1 (Probability-Margin-Bounded Tail Router Jitter):} At each MoE gate, \OD{} preserves the top $k-1$ highest-probability experts $\mathcal{C}_{\mathrm{core}}$ deterministically and perturbs only the $k$-th (lowest-weight) slot among near-tied candidates within probability margin $\gamma_p$ of $p_{(k)}$:
+\begin{equation}\label{eq:margin_gumbel}
+  e_k^* = \arg\max_{e \notin \mathcal{C}_{\mathrm{core}} \,:\, p_e \ge p_{(k)} - \gamma_p} \big( p_e + \mathrm{Gumbel}(0, b_{\mathrm{gate}}(\epsilon)) \big),
+\end{equation}
+where $\gamma_p \in [3.5 \times 10^{-4}, 8.0 \times 10^{-4}]$. Because $p_{(k)}$ itself always satisfies the constraint, the candidate set is nonempty, and any swap changes token gating probability mass by at most $\gamma_p$.
+
+\emph{Stage 2 (Per-Tenant Shadow-Expert Overflow Capping):} Each Expert Rank caches read-only Shadow Replicas in idle HBM. Given Victim~A's raw expert counts $r_{\ell, e}$ with $\sum_e r_{\ell, e} = k B_{\mathrm{vic}}$, \OD{} caps every home expert at threshold $\tau_{\mathrm{cap}}(\epsilon) > \bar{c} = k B_{\mathrm{vic}}/E$ and redirects overflow $\Omega_\ell = \sum_e \max(r_{\ell, e} - \tau_{\mathrm{cap}}, 0)$ onto Victim~A's own lightest local slots (breaking ties with a per-tick CSPRNG seed) up to $\tau_{\mathrm{cap}}$. Because $E \tau_{\mathrm{cap}} > k B_{\mathrm{vic}}$, $100\%$ of real victim tokens fit inside the $E$ slots with $0 \le c_{\ell, e} \le \tau_{\mathrm{cap}}$ and $\sum_e c_{\ell, e} = k B_{\mathrm{vic}}$, eliminating single-rank spikes without inspecting other tenants.
+
+\emph{Stage 3 (Shifted Two-Sided Gaussian Blinding with Data-Independent Clipping):} To eliminate both kernel-skip leakage and secret-dependent lower bounds, \OD{} applies convex leveling and adds \emph{two-sided} shifted Gaussian noise followed by \emph{data-independent} clipping to $[N_{\min}, N_{\max}]$:
+\begin{align}\label{eq:dp_pad}
+  U_{\ell, e} &= (1 - \alpha_\epsilon) c_{\ell, e} + \alpha_\epsilon \tau_{\mathrm{cap}}(\epsilon) + \mu_{\mathrm{shift}}(\epsilon) + Z_{\ell, e}, \nonumber\\
+  T_{\ell, e} &= \mathrm{Clip}_{[N_{\min}, N_{\max}]}\!\big(\mathrm{Round}(U_{\ell, e})\big),
+\end{align}
+where $Z_{\ell, e} \stackrel{\mathrm{i.i.d.}}{\sim} \mathcal{N}(0, \sigma_{\mathrm{DP}}(\epsilon)^2)$, $N_{\min} = 1$ (constant occupancy across all $E$ slots, closing the $\tau_{\mathrm{launch}}$ kernel-skip channel), and $N_{\max} = \lceil \tau_{\mathrm{cap}} + 2\mu_{\mathrm{shift}} + 2 \rceil \ll M_{\mathrm{tile}}$ is a public constant. Splitting the privacy failure budget equally as $\delta = \delta_{\mathrm{zCDP}} + \delta_{\mathrm{tail}}$ ($\delta/2$ each), we set $\mu_{\mathrm{shift}} = \sigma_{\mathrm{DP}} \Phi^{-1}(1 - \delta_{\mathrm{tail}}/(LE))$. Because $(1-\alpha_\epsilon)c_{\ell,e} + \alpha_\epsilon\tau_{\mathrm{cap}} \ge c_{\ell,e}$ for all $c_{\ell,e} \le \tau_{\mathrm{cap}}$, the underflow event $\mathcal{E}_{\mathrm{ok}}^c = \{\exists (\ell, e) : T_{\ell, e} < c_{\ell, e}\}$ occurs with probability at most $\delta_{\mathrm{tail}} = \delta/2$ (and $0$ observed slots across all experiments). On $\mathcal{E}_{\mathrm{ok}}$, each slot dispatches $c_{\ell, e}$ real tokens plus $T_{\ell, e} - c_{\ell, e} \ge 0$ zero-weight dummy tokens; on the rare $\mathcal{E}_{\mathrm{ok}}^c$, excess real tokens spill to a shadow replica. Thus Stages~2 and~3 are exact algebraic isometries on model outputs ($0.0000$ perplexity impact) while keeping every kernel inside Tile~1.
+
+\begin{table}[t]
+  \centering
+  \caption{Reproducible \OD{} Hyperparameter Schedules ($\delta = 10^{-5}$, $\delta_{\mathrm{zCDP}} = \delta_{\mathrm{tail}} = 5 \times 10^{-6}$, $B_{\mathrm{vic}} = 64$, $N_{\min} = 1$).}
+  \label{tab:obliv_params}
+  \renewcommand{\arraystretch}{1.08}
+  \resizebox{\columnwidth}{!}{%
+  \begin{tabular}{llcccccc}
+    \toprule
+    \textbf{Model} & $\epsilon$ & $\tau_{\mathrm{cap}}$ & $1 - \alpha_\epsilon$ & $b_{\mathrm{gate}}$ & $\sigma_{\mathrm{DP}}$ & $\mu_{\mathrm{shift}}$ & $N_{\max}$ \\
+    \midrule
+    \multirow{5}{*}{\texttt{OLMoE-7B}}
+      & $8.0$ & $16$ & $0.00553$ & $0.00071$ & $2.00$ & $11.47$ & $41$ \\
+      & $4.0$ & $13$ & $0.00412$ & $0.00100$ & $2.00$ & $11.47$ & $38$ \\
+      & $2.0$ & $11$ & $0.00270$ & $0.00141$ & $1.80$ & $10.32$ & $34$ \\
+      & $1.0$ & $10$ & $0.00157$ & $0.00200$ & $1.60$ & $9.18$  & $31$ \\
+      & $0.5$ & $9$  & $0.00111$ & $0.00283$ & $1.50$ & $8.60$  & $29$ \\
+    \midrule
+    \multirow{5}{*}{\texttt{Granite-MoE}}
+      & $8.0$ & $24$ & $0.00522$ & $0.00071$ & $2.00$ & $11.37$ & $49$ \\
+      & $4.0$ & $21$ & $0.00375$ & $0.00100$ & $2.00$ & $11.37$ & $46$ \\
+      & $2.0$ & $19$ & $0.00237$ & $0.00141$ & $1.80$ & $10.23$ & $42$ \\
+      & $1.0$ & $18$ & $0.00135$ & $0.00200$ & $1.60$ & $9.10$  & $39$ \\
+      & $0.5$ & $17$ & $0.00093$ & $0.00283$ & $1.50$ & $8.53$  & $37$ \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}
+
+\begin{theorem}[\OD{} $(\epsilon,\delta)$-DP, Mutual Information Cap, and Perplexity Bound]\label{thm:dp_bound}
+Suppose \OD{} executes~\eqref{eq:dp_pad} across $L$ layers and $E$ experts with shadow cap $\tau_{\mathrm{cap}} > k B_{\mathrm{vic}}/E$, split failure budget $\delta_{\mathrm{zCDP}} = \delta_{\mathrm{tail}} = \delta/2$, raw query-level sensitivity $\Delta_{2,\mathrm{raw}} = \sqrt{2 L \tau_{\mathrm{cap}} \min(k B_{\mathrm{vic}},\, E\tau_{\mathrm{cap}} - k B_{\mathrm{vic}})}$, calibrated noise $\sigma_{\mathrm{DP}} = (1 - \alpha_\epsilon)\Delta_{2,\mathrm{raw}}/\sqrt{2\rho}$ where $\epsilon = \rho + 2\sqrt{\rho \ln(1/\delta_{\mathrm{zCDP}})}$, and tail shift $\mu_{\mathrm{shift}} = \sigma_{\mathrm{DP}}\Phi^{-1}(1 - \delta_{\mathrm{tail}}/(LE))$. Then:
+\begin{enumerate}
+  \item \textbf{$(\epsilon,\delta)$-DP and Mutual Information Bound:} The dispatched timing trace $\Delta\mathbf{ITL}_{\mathrm{adv}}$ satisfies query-level $(\epsilon, \delta)$-DP, and for any prior over $K$ victim classes $Y \in \{1, \dots, K\}$,
+  \begin{align}\label{eq:mi_bound}
+    I(Y; \Delta\mathbf{ITL}_{\mathrm{adv}}) &\le \min\!\Big(\log_2 K,\; (1-\delta_{\mathrm{tail}})\frac{\rho}{\ln 2} \nonumber\\
+    &\qquad + \delta_{\mathrm{tail}}\log_2 K + H_2(\delta_{\mathrm{tail}})\Big),
+  \end{align}
+  where $\sqrt{\rho} = \sqrt{\ln(2/\delta) + \epsilon} - \sqrt{\ln(2/\delta)}$, and any classifier's accuracy $1 - P_e$ obeys Fano's bound $\log_2 K - I(Y; \Delta\mathbf{ITL}_{\mathrm{adv}}) \le H_2(P_e) + P_e \log_2(K-1)$.
+  \item \textbf{Perplexity Stability Bound:} If expert outputs satisfy $\|f_{\ell, e}(h)\|_2 \le B_f$ and downstream log-softmax loss is $L_{\mathrm{lip}}$-Lipschitz in per-layer residual perturbations, Stage~1's margin-$\gamma_p$ tail swap shifts corpus perplexity $\mathrm{PPL}_0$ by at most
+  \begin{equation}\label{eq:ppl_bound}
+    \Delta\mathrm{PPL} \le \mathrm{PPL}_0 \Big(\exp\!\big(2 L \, \gamma_p \, B_f \, L_{\mathrm{lip}}\big) - 1\Big).
+  \end{equation}
+\end{enumerate}
+\end{theorem}
+
+\begin{proof}
+For any two $B_{\mathrm{vic}}$-token victim queries $X, X'$, Stage~2 produces counts $c_\ell, c'_\ell \in [0, \tau_{\mathrm{cap}}]^E$ with $\sum_e c_{\ell,e} = \sum_e c'_{\ell,e} = S = k B_{\mathrm{vic}}$. Letting $D_+ = \sum_{e: c_{\ell,e} > c'_{\ell,e}}(c_{\ell,e} - c'_{\ell,e})$, we have both $D_+ \le S$ and $D_+ \le \sum_e(\tau_{\mathrm{cap}} - c'_{\ell,e}) = E\tau_{\mathrm{cap}} - S$, so $\|c_\ell - c'_\ell\|_1 = 2 D_+ \le 2\min(S, E\tau_{\mathrm{cap}} - S)$ and $\|c_\ell - c'_\ell\|_2^2 \le \tau_{\mathrm{cap}}\|c_\ell - c'_\ell\|_1$, giving query-level $\ell_2$ sensitivity $\Delta_{2,\mathrm{raw}}$ across $L$ layers and post-leveling sensitivity $\Delta_2(\epsilon) = (1 - \alpha_\epsilon)\Delta_{2,\mathrm{raw}}$. Adding two-sided $Z_{\ell,e} \sim \mathcal{N}(0, \sigma_{\mathrm{DP}}^2)$ with $\sigma_{\mathrm{DP}} = \Delta_2(\epsilon)/\sqrt{2\rho}$ makes $U$ satisfy exact $\rho$-zCDP~\cite{bun2016zcdp}, hence $(\epsilon, \delta_{\mathrm{zCDP}})$-DP. Because $\mathrm{Round}$ and $\mathrm{Clip}_{[N_{\min}, N_{\max}]}$ use public bounds independent of $c$, $T$ is pure post-processing of $U$ and inherits exact $\rho$-zCDP. Furthermore, since $\alpha_\epsilon(\tau_{\mathrm{cap}} - c_{\ell,e}) \ge 0$ and $N_{\max} \ge \tau_{\mathrm{cap}}$, $T_{\ell,e} < c_{\ell,e}$ implies $Z_{\ell,e} < -\mu_{\mathrm{shift}}$. By a union bound over $LE$ slots, $\Pr[\mathcal{E}_{\mathrm{ok}}^c] \le LE \cdot \Phi(-\mu_{\mathrm{shift}}/\sigma_{\mathrm{DP}}) = \delta_{\mathrm{tail}}$. On $\mathcal{E}_{\mathrm{ok}}$, execution depends solely on $T$ (post-processing of $U$); absorbing $\Pr[\mathcal{E}_{\mathrm{ok}}^c] \le \delta_{\mathrm{tail}}$ into the additive failure budget yields $(\epsilon, \delta_{\mathrm{zCDP}} + \delta_{\mathrm{tail}}) = (\epsilon, \delta)$-DP. For~\eqref{eq:mi_bound}, letting $E = \mathbb{I}[\mathcal{E}_{\mathrm{ok}}]$, the chain rule gives $I(Y; \Delta\mathbf{ITL}_{\mathrm{adv}}) \le I(Y; E) + I(Y; \Delta\mathbf{ITL}_{\mathrm{adv}} \mid E) \le H_2(\delta_{\mathrm{tail}}) + (1-\delta_{\mathrm{tail}}) I(Y; U) + \delta_{\mathrm{tail}}\log_2 K$, and $I(Y; U) \le \rho/\ln 2$ by Bun and Steinke~\cite{bun2016zcdp} and Cuff and Yu~\cite{cuff2016dpmi}. For~\eqref{eq:ppl_bound}, Stages~2 and~3 introduce zero hidden-state error, while Stage~1 swaps at most one expert $e_{(k)} \to e^*$ with $|p_{e_{(k)}} - p_{e^*}| \le \gamma_p$, bounding per-token NLL shift by $2 L \gamma_p B_f L_{\mathrm{lip}}$.
+\end{proof}
+
+% ============================================================================
+\section{Experimental Methodology and MoELeak-Bench}\label{sec:methodology}
+% ============================================================================
+
+\emph{Hardware and Models:} All experiments run locally on an Apple M5 Pro workstation ($48.0~\mathrm{GB}$ unified memory, Metal Performance Shaders $\mathrm{FP16}$, Python $3.11.15$, PyTorch $2.15.0$, \texttt{transformers} $5.22.1$). To test generalization across MoE routing architectures within $48~\mathrm{GB}$ RAM without swap contention, we load and evaluate two distinct open-weight MoE models sequentially, freeing GPU memory via \texttt{torch.mps.empty\_cache()} between runs:
+\begin{enumerate}
+  \item \textbf{\texttt{allenai/OLMoE-1B-7B-0924-Instruct}~\cite{muennighoff2025olmoe}:} $6.9\mathrm{B}$ total / $1.3\mathrm{B}$ active parameters ($13.85~\mathrm{GB}$ $\mathrm{FP16}$), $L=16$ MoE layers, $E=64$ routed experts per layer ($H=2048$, $I=1024$), unnormalized full-vocabulary $\text{top-}8$ softmax routing, partitioned across $P=8$ Expert Ranks ($8$ experts/rank).
+  \item \textbf{\texttt{ibm-granite/}\allowbreak\texttt{granite-3.1-}\allowbreak\texttt{1b-a400m-instruct}~\cite{gale2023megablocks}:} $1.3\mathrm{B}$ total / $400\mathrm{M}$ active parameters ($2.67~\mathrm{GB}$ $\mathrm{FP16}$), $L=24$ MoE layers, $E=32$ fine-grained MegaBlocks routed experts per layer ($H=1024$, $I=512$), Mixtral-style top-$k$-renormalized $\text{top-}8$ routing with residual scaling, partitioned across $P=8$ Expert Ranks ($4$ experts/rank).
+\end{enumerate}
+
+\emph{Zero-Length-Leakage Benchmark (\MLB{}):} A critical pitfall in side-channel evaluations is inadvertently classifying categories from prompt token length rather than expert routing patterns. We construct \MLB{} with a strict constant-length invariant: every query exceeds $68$ tokens and is truncated to an identical $B_{\mathrm{vic}} = 64$-token victim prefill window, emitting identically $L \cdot B_{\mathrm{vic}} \cdot k$ expert activations ($8{,}192$ on \texttt{OLMoE}; $12{,}288$ on \texttt{Granite-3.1-MoE}) for every query ($0.00~\mathrm{bits}$ of total-load or length leakage). \MLB{} comprises two tiers:
+\begin{itemize}
+  \item \textbf{Tier~1 (\texttt{Domain-5}, $100$ Queries):} $20$ distinct prompts per category across five sensitive enterprise domains: \emph{Clinical/Medical}, \emph{SQL/Database Tool}, \emph{Stripe/Payment Tool}, \emph{Crypto/Auth Code}, and \emph{Legal Contract}. Random-guess accuracy is $20.0\%$ ($\log_2 5 = 2.322~\mathrm{bits}$).
+  \item \textbf{Tier~2 (\texttt{MCP-Tools-20}, $160$ Queries):} Inspired by BFCL~\cite{patil2024bfcl} and production MCP servers~\cite{anthropic2024mcp}, $8$ distinct JSON-RPC \texttt{tools/call} payloads across $20$ enterprise MCP tool schemas (\texttt{postgres\_readonly\_sql}, \texttt{snowflake\_warehouse\_agg}, \texttt{stripe\_create\_payment\_intent}, \texttt{stripe\_issue\_refund}, \texttt{plaid\_ach\_transfer}, \texttt{fhir\_patient\_medication\_order}, \texttt{hl7\_lab\_pathology\_ingest}, \texttt{kms\_aes\_gcm\_envelope\_seal}, \texttt{oidc\_jwt\_rs256\_verify}, \texttt{github\_pull\_request\_diff\_review}, \texttt{kubernetes\_pod\_autoscaler\_patch}, \texttt{terraform\_aws\_iam\_policy\_plan}, \texttt{splunk\_siem\_threat\_hunt}, \texttt{jira\_incident\_escalation}, \texttt{slack\_secops\_channel\_post}, \texttt{salesforce\_enterprise\_quote\_update}, \texttt{docusign\_msa\_indemnity\_clause}, \texttt{sec\_edgar\_10k\_covenant\_extract}, \texttt{biopython\_crispr\_guide\_score}, and \texttt{quantlib\_black\_scholes\_greeks}). Each $64$-token payload models a victim agent's prefill/context ingestion chunk (such as tool-call context or schema verification) rather than single-token autoregressive decode. Random-guess accuracy is $5.0\%$ Top-1 and $15.0\%$ Top-3 ($\log_2 20 = 4.322~\mathrm{bits}$).
+\end{itemize}
+
+\emph{Metrics, Perplexity Corpus, and Live HTTP/1.1 SSE Harness:} All accuracy and Macro-F1 figures use blind stratified $K$-fold cross-validation ($5$-fold on Tier~1; $4$-fold on Tier~2) with training-fold-only standardization, reporting cross-fold standard deviations in Tables~\ref{tab:domain5_attack}--\ref{tab:mcp20} and $3$-seed means $\pm$ standard deviations in Table~\ref{tab:oblivdispatch}. Because standard plug-in or Miller--Madow estimators~\cite{miller1955note} exhibit positive bias when $K^2 > N$ (as in $K=20, N=160$), we report \emph{permutation-calibrated Mutual Information} $I_{\mathrm{cal}}(Y; \hat{Y}) = \max(0,\, I_{\mathrm{plug}}(Y; \hat{Y}) - \bar{I}_{\mathrm{perm}})$ averaged over $200$ random label permutations, which yields $0.000~\mathrm{bits}$ at random guessing. Corpus Perplexity ($\mathrm{PPL}$) is measured via exact full-model forward passes with live PyTorch gate hooks across $3$ random seeds on \texttt{MoELeak-Bench/PPL\_EVAL\_CORPUS}, an independent $8$-passage multi-domain technical corpus totaling $371$ tokens under \texttt{OLMoE-1B-7B} and $445$ tokens under \texttt{Granite-3.1-MoE}. Beyond hardware-table AFD simulation across synthetic Gaussian jitter $\sigma_{\mathrm{net}} \in \{10, 50, 200\}~\mu\mathrm{s}$, we deploy a multi-threaded \texttt{127.0.0.1} \texttt{TCP\_NODELAY} HTTP/1.1 chunked SSE server executing live synchronized MPS $\mathrm{FP16}$ expert kernels before flushing each TCP frame.
+
+% ============================================================================
+\section{Evaluation}\label{sec:eval}
+% ============================================================================
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.88\textwidth]{fig2_multimodel_jitter_asr.pdf}
+  \caption{Five-domain blind prompt classification accuracy across network jitter $\sigma_{\mathrm{net}} \in \{10, 50, 200\}~\mu\mathrm{s}$ under zero length leakage ($B_{\mathrm{vic}} = 64$ tokens) on (a) \texttt{OLMoE-1B-7B} ($64$ experts, unnormalized $\text{top-}8$) and (b) \texttt{Granite-3.1-MoE} ($32$ experts, normalized $\text{top-}8$), comparing tile-sized \SM{} ($N_{\mathrm{can}} = 122$) under Selective IBGDA and Global Synchronous Barriers against uncalibrated naive canaries ($N \in \{16, 32\}$).}
+  \label{fig:multimodel_asr}
+\end{figure*}
+
+\begin{table*}[t]
+  \centering
+  \caption{Undefended \SM{} Five-Domain Reconstruction Across MoE Architectures, Combine Barriers, Canary Sizes, and Synthetic Network Jitter ($100$ Blind Queries, $B_{\mathrm{vic}}=64$, $5$-Fold Mean $\pm$ Fold Std, Random Floor $= 20.0\%$, Max Entropy $= 2.322~\mathrm{bits}$).}
+  \label{tab:domain5_attack}
+  \renewcommand{\arraystretch}{1.10}
+  \resizebox{\textwidth}{!}{%
+  \begin{tabular}{llccccccc}
+    \toprule
+    \textbf{Model Architecture} & \textbf{Jitter $\sigma_{\mathrm{net}}$} & \textbf{White-Box Rank Oracle} & \textbf{Tile-$122$ (IBGDA Acc / F1)} & \textbf{Tile-$122$ (Global Acc / F1)} & \textbf{Tile-$122$ Global MI} & \textbf{Naive-$32$ (Global Acc)} & \textbf{Naive-$16$ (Global Acc)} & \textbf{Gain vs.\ Naive-$16$} \\
+    \midrule
+    \multirow{3}{*}{\texttt{OLMoE-1B-7B} ($16\mathrm{L}, 64\mathrm{E}$)}
+      & $10~\mu\mathrm{s}$ (LAN/RDMA) & \multirow{3}{*}{$99.0 \pm 2.2\%$ ($2.139~\mathrm{b}$)} & $83.0 \pm 11.5\%$ / $82.6\%$ & $\mathbf{86.0 \pm 10.3\%}$ / $\mathbf{85.7\%}$ & $1.699~\mathrm{bits}$ & $84.0 \pm 5.5\%$ & $73.0 \pm 6.7\%$ & $\mathbf{+13.0\%}$ (Global) \\
+      & $50~\mu\mathrm{s}$ (Cloud API) & & $\mathbf{87.0 \pm 7.6\%}$ / $\mathbf{86.9\%}$ & $\mathbf{77.0 \pm 16.1\%}$ / $\mathbf{77.3\%}$ & $\mathbf{1.516~\mathrm{bits}}$ & $65.0 \pm 12.8\%$ & $70.0 \pm 5.0\%$ & $\mathbf{+17.0\%}$ (IBGDA) \\
+      & $200~\mu\mathrm{s}$ (WAN HTTP) & & $\mathbf{77.0 \pm 4.5\%}$ / $\mathbf{76.9\%}$ & $\mathbf{55.0 \pm 5.0\%}$ / $\mathbf{54.9\%}$ & $\mathbf{0.943~\mathrm{bits}}$ & $46.0 \pm 5.5\%$ & $39.0 \pm 2.2\%$ & $\mathbf{+38.0\%}$ (IBGDA) \\
+    \midrule
+    \multirow{3}{*}{\texttt{Granite-3.1-MoE} ($24\mathrm{L}, 32\mathrm{E}$)}
+      & $10~\mu\mathrm{s}$ (LAN/RDMA) & \multirow{3}{*}{$99.0 \pm 2.2\%$ ($2.139~\mathrm{b}$)} & $\mathbf{77.0 \pm 6.7\%}$ / $\mathbf{77.0\%}$ & $71.0 \pm 8.9\%$ / $71.3\%$ & $1.107~\mathrm{bits}$ & $73.0 \pm 12.0\%$ & $71.0 \pm 8.2\%$ & $\mathbf{+6.0\%}$ (IBGDA) \\
+      & $50~\mu\mathrm{s}$ (Cloud API) & & $\mathbf{53.0 \pm 11.5\%}$ / $\mathbf{52.7\%}$ & $\mathbf{42.0 \pm 18.2\%}$ / $\mathbf{41.9\%}$ & $\mathbf{0.385~\mathrm{bits}}$ & $41.0 \pm 5.5\%$ & $37.0 \pm 9.1\%$ & $\mathbf{+16.0\%}$ (IBGDA) \\
+      & $200~\mu\mathrm{s}$ (WAN HTTP) & & $\mathbf{32.0 \pm 13.0\%}$ / $\mathbf{30.7\%}$ & $29.0 \pm 11.4\%$ / $28.7\%$ & $0.025~\mathrm{bits}$ & $25.0 \pm 6.1\%$ & $33.0 \pm 13.5\%$ & $-1.0\%$ \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table*}
+
+\subsection{Hardware Tile-Cliff Verification and Canary Coverage}
+Fig.~\ref{fig:tile_cliff}(a) presents our interleaved M5 Pro MPS kernel measurements across co-batched token counts $N \in [1, 224]$. On \texttt{OLMoE-1B-7B} ($H=2048, I=1024$), single-expert execution stays nearly flat across $N=32$ ($89.75~\mu\mathrm{s}$) and $N=64 \to 65$ ($99.21 \to 102.64~\mu\mathrm{s}$, $+3.43~\mu\mathrm{s}$), then jumps by $+27.71~\mu\mathrm{s}$ per expert ($107.53 \to 135.24~\mu\mathrm{s}$) right at $N = 128 \to 129$. On \texttt{Granite-3.1-MoE} ($H=1024, I=512$, $24$ layers), per-expert latency similarly exhibits a distinct step jump across $N = 128 \to 129$ ($53.07 \to 57.35~\mu\mathrm{s}$, $+4.29~\mu\mathrm{s}$/expert). Live co-batched $16$-layer rank execution correlates with empirical table summation at Pearson $r = 0.9513$.
+
+Our blind vocabulary profiler screens $189$--$216$ rank-concentrated tokens in $9.9~\mathrm{s}$ on \texttt{OLMoE-1B-7B} ($7.2~\mathrm{s}$ on \texttt{Granite-3.1-MoE}) without inspecting any victim text. Every selected canary sequence ($N_{\mathrm{can}} = 122$) saturates its routed experts at $122/122$ hits, covering $285/1{,}024$ ($27.83\%$) distinct $(\text{layer}, \text{expert})$ cliffs on \texttt{OLMoE-1B-7B} and $310/768$ ($40.36\%$) on \texttt{Granite-3.1-MoE} with only $M = 32$ probes.
+
+\subsection{Multi-Model 5-Domain Reconstruction vs.\ Network Jitter}
+Fig.~\ref{fig:multimodel_asr} and Table~\ref{tab:domain5_attack} report Tier~1 five-domain classification accuracy across both MoE models. First, the white-box $8$-rank count oracle reaches $99.0 \pm 2.2\%$ accuracy ($2.139~\mathrm{bits}$ permutation-calibrated MI) on both \texttt{OLMoE-1B-7B} and \texttt{Granite-3.1-MoE}, confirming that coarse rank-level expert aggregation preserves nearly complete semantic domain identity despite identical $64$-token prompt lengths.
+
+Second, remote black-box probing via \SM{} ($N_{\mathrm{can}} = 122$, $R=6$ streamed tokens/probe) recovers $83.0\%$--$87.0\%$ accuracy under Selective IBGDA combine and $86.0\%$ ($1.699~\mathrm{bits}$) to $77.0\%$ ($1.516~\mathrm{bits}$) under a strict Global Synchronous Barrier at $\sigma_{\mathrm{net}} \in \{10, 50\}~\mu\mathrm{s}$ on \texttt{OLMoE-1B-7B}. As network jitter rises to $\sigma_{\mathrm{net}} = 200~\mu\mathrm{s}$, naive $N=16$ accuracy drops from $73.0\%$ to $39.0\%$, whereas tile-sized \SM{} maintains $77.0 \pm 4.5\%$ (IBGDA) and $55.0 \pm 5.0\%$ (Global Barrier), matching Theorem~\ref{thm:capacity}'s predicted SNR advantage. On \texttt{Granite-3.1-MoE}, \SM{} reaches $77.0\%$ (IBGDA) and $71.0\%$ (Global Barrier) at $\sigma_{\mathrm{net}} = 10~\mu\mathrm{s}$, then decays to $53.0\%$ and $42.0\%$ at $\sigma_{\mathrm{net}} = 50~\mu\mathrm{s}$. This cross-model contrast confirms Theorem~\ref{thm:capacity}: because \texttt{Granite-3.1-MoE}'s smaller $1.0~\mathrm{MB}$ experts ($H=1024, I=512$) fit inside on-chip GPU cache with a $+4.29~\mu\mathrm{s}$ tile step, whereas \texttt{OLMoE-1B-7B}'s $6.3~\mathrm{MB}$ experts ($H=2048, I=1024$) stream from HBM with a $+27.71~\mu\mathrm{s}$ tile step, larger HBM-bound frontier MoEs exhibit $6.5\times$ stronger tile-cliff echoes and higher jitter resilience.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.88\textwidth]{fig3_mcp20_reconstruction.pdf}
+  \caption{Fine-grained $20$-schema Enterprise MCP tool-call reconstruction (\MLB{} Tier~2, $160$ constant-length JSON-RPC prefill chunks, random floor $= 5.0\%$ Top-1, $15.0\%$ Top-3). (a) Undefended Top-1 and Top-3 reconstruction accuracy across $\sigma_{\mathrm{net}} \in \{10, 50, 200\}~\mu\mathrm{s}$. (b) Collapse of $20$-way Top-1 and Top-3 accuracy to the random-guess floor under \OD{} across $\epsilon \in \{8.0, 2.0, 1.0, 0.5\}$ ($\sigma_{\mathrm{net}} = 50~\mu\mathrm{s}$).}
+  \label{fig:mcp20}
+\end{figure*}
+
+\begin{table}[t]
+  \centering
+  \caption{Fine-Grained $20$-Schema MCP Tool Reconstruction ($160$ Prefill Chunks, $4$-Fold Mean $\pm$ Fold Std, Permutation-Calibrated MI, Random Top-1 $= 5.0\%$, Top-3 $= 15.0\%$).}
+  \label{tab:mcp20}
+  \renewcommand{\arraystretch}{1.10}
+  \resizebox{\columnwidth}{!}{%
+  \begin{tabular}{llcccc}
+    \toprule
+    \textbf{Model} & \textbf{Setting ($\sigma_{\mathrm{net}}$ / Defense)} & \textbf{Top-1 (\%)} & \textbf{Top-3 (\%)} & \textbf{Macro-F1} & \textbf{MI (bits)} \\
+    \midrule
+    \multirow{7}{*}{\texttt{OLMoE-7B}}
+      & Tile-$122$ IBGDA ($10~\mu\mathrm{s}$) & $\mathbf{90.0 \pm 3.5}$ & $\mathbf{94.4 \pm 1.3}$ & $89.9\%$ & $2.320$ \\
+      & Tile-$122$ Global ($50~\mu\mathrm{s}$) & $75.6 \pm 9.4$ & $90.0 \pm 2.0$ & $75.3\%$ & $1.762$ \\
+      & Tile-$122$ IBGDA ($50~\mu\mathrm{s}$) & $\mathbf{87.5 \pm 0.0}$ & $\mathbf{94.4 \pm 1.3}$ & $87.3\%$ & $2.216$ \\
+      & Naive-$16$ Global ($50~\mu\mathrm{s}$) & $40.6 \pm 6.6$ & $65.6 \pm 8.5$ & $40.2\%$ & $0.749$ \\
+      & \OD{} $\epsilon=8.0$ ($50~\mu\mathrm{s}$) & $\mathbf{4.4}$ & $\mathbf{16.9}$ & $4.7\%$ & $\mathbf{0.000}$ \\
+      & \OD{} $\epsilon=2.0$ ($50~\mu\mathrm{s}$) & $\mathbf{6.3}$ & $\mathbf{14.4}$ & $6.2\%$ & $\mathbf{0.012}$ \\
+      & \OD{} $\epsilon=1.0$ ($50~\mu\mathrm{s}$) & $\mathbf{6.3}$ & $25.0$ & $6.6\%$ & $\mathbf{0.065}$ \\
+    \midrule
+    \multirow{5}{*}{\texttt{Granite-MoE}}
+      & Tile-$122$ IBGDA ($10~\mu\mathrm{s}$) & $\mathbf{78.1 \pm 2.4}$ & $\mathbf{90.6 \pm 4.7}$ & $77.6\%$ & $1.852$ \\
+      & Tile-$122$ IBGDA ($50~\mu\mathrm{s}$) & $\mathbf{37.5 \pm 11.7}$ & $\mathbf{64.4 \pm 8.3}$ & $38.3\%$ & $0.678$ \\
+      & Naive-$16$ Global ($50~\mu\mathrm{s}$) & $19.4 \pm 8.3$ & $44.4 \pm 6.3$ & $19.7\%$ & $0.192$ \\
+      & \OD{} $\epsilon=2.0$ ($50~\mu\mathrm{s}$) & $\mathbf{5.0}$ & $\mathbf{13.8}$ & $4.6\%$ & $\mathbf{0.000}$ \\
+      & \OD{} $\epsilon=1.0$ ($50~\mu\mathrm{s}$) & $\mathbf{1.3}$ & $\mathbf{15.6}$ & $1.3\%$ & $\mathbf{0.000}$ \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table}
+
+\subsection{20-Schema Enterprise MCP Tool-Call Reconstruction}
+Fig.~\ref{fig:mcp20} and Table~\ref{tab:mcp20} evaluate Tier~2 ($160$ JSON-RPC prefill chunks across $20$ MCP tools, all sharing identical outer JSON-RPC \texttt{tools/call} envelopes and identical $64$-token lengths). Despite identical wrappers and closely related sub-schemas, \SM{} identifies the exact invoked MCP tool on \texttt{OLMoE-1B-7B} at $90.0 \pm 3.5\%$ Top-1 and $94.4 \pm 1.3\%$ Top-3 accuracy ($2.320~\mathrm{bits}$ permutation-calibrated MI) at $\sigma_{\mathrm{net}} = 10~\mu\mathrm{s}$, and $87.5\%$ Top-1 / $94.4\%$ Top-3 at $\sigma_{\mathrm{net}} = 50~\mu\mathrm{s}$ ($17.5\times$ above the $5.0\%$ random floor). At $\sigma_{\mathrm{net}} = 50~\mu\mathrm{s}$, Tile-Boundary Priming more than doubles $20$-way Top-1 accuracy over Naive-$16$ probing ($87.5\%$ IBGDA / $75.6\%$ Global vs.\ $40.6\%$). Enabling sound per-tenant \OD{} at $\epsilon \in \{8.0, 2.0, 1.0, 0.5\}$ collapses $20$-way MCP Top-1 accuracy to $1.3\%$--$6.3\%$ and drives permutation-calibrated MI to $0.000$--$0.065~\mathrm{bits}$, matching uniform guessing.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.88\textwidth]{fig4_oblivdispatch_pareto_theory.pdf}
+  \caption{\OD{} $(\epsilon, \delta)$-DP mitigation tradeoff and Theorem~\ref{thm:dp_bound} verification ($\sigma_{\mathrm{net}} = 50~\mu\mathrm{s}$, $\delta = 10^{-5}$, $3$-seed mean $\pm$ std). (a) Attacker $5$-domain accuracy collapse vs.\ serving $\mathrm{TPOT}$ overhead across $\epsilon \in \{8.0, 4.0, 2.0, 1.0, 0.5\}$. (b) Permutation-calibrated empirical Mutual Information compared against Theorem~\ref{thm:dp_bound}'s analytical $\rho$-zCDP upper bound.}
+  \label{fig:oblivdispatch}
+\end{figure*}
+
+\begin{table*}[t]
+  \centering
+  \caption{\OD{} $(\epsilon, \delta)$-DP Privacy, Perplexity, and Serving $\mathrm{TPOT}$ Tradeoff Across Both MoE Models ($3$-Seed Mean $\pm$ Std, $\delta = 10^{-5}$, $\sigma_{\mathrm{net}} = 50~\mu\mathrm{s}$, $0$ Underflow Slots Across All Runs, Random Floor $= 20.0\%$).}
+  \label{tab:oblivdispatch}
+  \renewcommand{\arraystretch}{1.10}
+  \resizebox{\textwidth}{!}{%
+  \begin{tabular}{llcccccccc}
+    \toprule
+    \textbf{Model} & \textbf{Defense Budget} & \textbf{Global Acc (\%)} & \textbf{IBGDA Acc (\%)} & \textbf{Emp.\ MI (bits)} & \textbf{Thm.~\ref{thm:dp_bound} Cap} & \textbf{Corpus PPL} & \textbf{$\Delta\mathrm{PPL}$} & \textbf{TPOT (ms)} & \textbf{TPOT Overhead} \\
+    \midrule
+    \multirow{6}{*}{\texttt{OLMoE-1B-7B}}
+      & Undefended AFD & $77.0 \pm 16.1$ & $87.0 \pm 7.6$ & $1.516$ & $2.322$ & $28.587$ & $0.000$ & $24.47$ & $0.00\%$ \\
+      & \OD{} ($\epsilon = 8.0$) & $\mathbf{20.0 \pm 4.9}$ & $\mathbf{22.7 \pm 3.9}$ & $\mathbf{0.057}$ & $1.447$ & $28.695 \pm 0.094$ & $+0.109$ & $26.47$ & $+8.17\%$ \\
+      & \OD{} ($\epsilon = 4.0$) & $\mathbf{19.3 \pm 2.1}$ & $\mathbf{21.0 \pm 1.6}$ & $\mathbf{0.011}$ & $0.408$ & $28.585 \pm 0.123$ & $-0.002$ & $26.50$ & $+8.30\%$ \\
+      & \OD{} ($\epsilon = 2.0$) & $\mathbf{19.0 \pm 2.4}$ & $\mathbf{21.3 \pm 1.7}$ & $\mathbf{0.018}$ & $0.110$ & $28.827 \pm 0.139$ & $+0.241$ & $26.62$ & $+8.78\%$ \\
+      & \OD{} ($\epsilon = 1.0$) & $\mathbf{20.0 \pm 2.2}$ & $\mathbf{23.0 \pm 2.8}$ & $\mathbf{0.028}$ & $0.029$ & $28.770 \pm 0.069$ & $+0.183$ & $26.66$ & $+8.93\%$ \\
+      & \OD{} ($\epsilon = 0.5$) & $26.7 \pm 5.2$ & $\mathbf{15.3 \pm 3.7}$ & $0.053$ & $0.007$ & $28.765 \pm 0.137$ & $+0.179$ & $26.41$ & $+7.94\%$ \\
+    \midrule
+    \multirow{6}{*}{\texttt{Granite-3.1-MoE}}
+      & Undefended AFD & $42.0 \pm 18.2$ & $53.0 \pm 11.5$ & $0.385$ & $2.322$ & $20.392$ & $0.000$ & $17.36$ & $0.00\%$ \\
+      & \OD{} ($\epsilon = 8.0$) & $\mathbf{20.3 \pm 2.6}$ & $\mathbf{22.3 \pm 5.9}$ & $\mathbf{0.033}$ & $1.447$ & $20.380 \pm 0.040$ & $-0.012$ & $17.77$ & $+2.37\%$ \\
+      & \OD{} ($\epsilon = 4.0$) & $\mathbf{16.7 \pm 1.2}$ & $\mathbf{17.7 \pm 2.5}$ & $\mathbf{0.015}$ & $0.408$ & $20.315 \pm 0.067$ & $-0.077$ & $17.77$ & $+2.33\%$ \\
+      & \OD{} ($\epsilon = 2.0$) & $\mathbf{21.7 \pm 3.3}$ & $\mathbf{20.3 \pm 3.8}$ & $\mathbf{0.011}$ & $0.110$ & $20.303 \pm 0.093$ & $-0.089$ & $17.76$ & $+2.33\%$ \\
+      & \OD{} ($\epsilon = 1.0$) & $\mathbf{20.3 \pm 4.8}$ & $\mathbf{20.0 \pm 2.9}$ & $\mathbf{0.014}$ & $0.029$ & $20.413 \pm 0.032$ & $+0.021$ & $17.78$ & $+2.39\%$ \\
+      & \OD{} ($\epsilon = 0.5$) & $\mathbf{19.7 \pm 2.4}$ & $\mathbf{20.7 \pm 2.6}$ & $\mathbf{0.003}$ & $0.007$ & $20.325 \pm 0.038$ & $-0.067$ & $17.78$ & $+2.42\%$ \\
+    \bottomrule
+  \end{tabular}%
+  }
+\end{table*}
+
+\subsection{OblivDispatch Pareto Analysis and Theorem 2 Audit}
+Fig.~\ref{fig:oblivdispatch} and Table~\ref{tab:oblivdispatch} evaluate sound per-tenant \OD{} across $\epsilon \in \{8.0, 4.0, 2.0, 1.0, 0.5\}$ ($\delta = 10^{-5}$, $3$ seeds). Across all $3 \times 5 \times 2$ runs, empirical underflow is identically $0$ slots, confirming that $\mu_{\mathrm{shift}} = \sigma_{\mathrm{DP}}\Phi^{-1}(1 - \delta_{\mathrm{tail}}/(LE))$ preserves $100\%$ of real victim tokens with data-independent clipping $[1, N_{\max}]$. Because exact query-level $\rho$-zCDP calibration sets $(1-\alpha_\epsilon)\Delta_{2,\mathrm{raw}} = \sigma_{\mathrm{DP}}\sqrt{2\rho}$, empirical leakage collapses immediately to the random floor even at $\epsilon = 8.0$ and obeys Theorem~\ref{thm:dp_bound}'s analytical upper bound across all budgets on \texttt{Granite-3.1-MoE} ($0.033 \le 1.447$, $0.015 \le 0.408$, $0.011 \le 0.110$, $0.014 \le 0.029$, $0.003 \le 0.007~\mathrm{bits}$) and on \texttt{OLMoE-1B-7B} for $\epsilon \ge 1.0$ ($0.057 \le 1.447$ down to $0.028 \le 0.029~\mathrm{bits}$, with a single-seed $N=100$ finite-sample fluctuation of $0.053~\mathrm{bits}$ at $\epsilon=0.5$ where IBGDA MI is $0.020~\mathrm{bits}$). Straggler-Slack Hiding keeps $\mathrm{TPOT}$ overhead at $+2.33\%$--$+2.42\%$ on \texttt{Granite-3.1-MoE} and $+7.94\%$--$+8.93\%$ on \texttt{OLMoE-1B-7B} (over an order of magnitude below uniform worst-case padding's $+700\%$ FFN inflation). On \texttt{PPL\_EVAL\_CORPUS}, $\Delta\mathrm{PPL}$ remains within $-0.002$ to $+0.241$ ($< 0.85\%$) on \texttt{OLMoE-1B-7B} ($371$ tokens) and $-0.089$ to $+0.021$ on \texttt{Granite-3.1-MoE} ($445$ tokens), where small negative shifts fall within the $\pm 0.09$ three-seed standard deviation of near-tie tail swaps on a compact corpus; notably, Theorem~\ref{thm:dp_bound}'s analytical perplexity bound in~\eqref{eq:ppl_bound} holds per token independently of corpus length because Stages~2 and~3 introduce zero hidden-state error.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.92\columnwidth]{fig5_live_http_loopback_cm.pdf}
+  \caption{End-to-end confusion matrices from our live localhost (\texttt{127.0.0.1}, \texttt{TCP\_NODELAY}) HTTP/1.1 chunked SSE streaming harness executing real M5 Pro MPS $\mathrm{FP16}$ kernels ($100$ victim queries + $1$ empty-cluster calibration run, $12{,}928$ streamed SSE frames total): (a) Undefended AFD ($39.0 \pm 7.4\%$ accuracy, $1.95\times$ random floor despite OS socket and host scheduling noise) vs.\ (b) \OD{} at $\epsilon = 1.0$ ($10.0\%$ accuracy, zero diagonal structure).}
+  \label{fig:live_http}
+\end{figure}
+
+\subsection{Live Localhost TCP/HTTP-1.1 SSE Loopback Evaluation}
+Finally, Fig.~\ref{fig:live_http} reports end-to-end results from our multi-endpoint \texttt{127.0.0.1} HTTP/1.1 chunked SSE harness on \texttt{OLMoE-1B-7B}. Across $100$ victim queries plus $1$ empty-cluster baseline calibration run, sweeping $16$ orthogonal probes with $1$ TTFT anchor plus $3$ streamed token chunks across both undefended and defended runs produces exactly $(100 + 1) \times 16 \times (1 + 3) \times 2 = 12{,}928$ live TCP SSE frames. Even under unmitigated macOS loopback socket framing, Python thread wake-up latency, and host background jitter, an external HTTP client recording only user-space \texttt{perf\_counter\_ns()} chunk arrival timestamps classifies the $5$ victim domains at $39.0 \pm 7.4\%$ accuracy ($37.2\%$ Macro-F1, $0.346~\mathrm{bits}$ MI; $1.95\times$ the $20.0\%$ random floor). Activating \OD{} ($\epsilon = 1.0$) eliminates diagonal class structure completely ($10.0\%$ accuracy, $9.8\%$ Macro-F1).
+
+% ============================================================================
+\section{Related Work}\label{sec:related}
+% ============================================================================
+
+\emph{LLM Cache, Packet, and Hardware Side Channels:} Timing attacks on shared LLM caches (\texttt{PROMPTPEEK}~\cite{wu2025promptpeek}, \texttt{InputSnatch}~\cite{zheng2025inputsnatch}) infer prompt prefixes from Time-To-First-Token reductions when cross-tenant KV or semantic caches hit; disabling cross-tenant cache sharing eliminates these channels completely. Packet-size side channels (\texttt{Whisper Leak}~\cite{microsoft2025whisperleak}) require a passive network adversary on the victim's encrypted Wi-Fi or ISP path. Microarchitectural GPU and MoE side channels~\cite{kocher1996timing,yarom2014flushreload,naghibijouybari2018rendered,tan2025gpugemmcliff}, notably \texttt{MoEcho}~\cite{ding2025moecho}, recover expert activations via co-resident CPU Pageout+Reload or GPU TLB Evict+Reload probes, whereas Patel et al.~\cite{patel2026routingmembership} analyze membership leakage when APIs explicitly return gate indices, and Carlini et al.~\cite{carlini2024stealing} extract final projection dimensions via logit queries. \SM{} requires zero host co-residency, zero shared KV state, zero victim network observation, and zero exposed gate telemetry.
+
+\emph{Disaggregated MoE Serving and Routing Skew:} Phase-splitting engines (\texttt{DistServe}~\cite{zhong2024distserve}, \texttt{Splitwise}~\cite{patel2024splitwise}, \texttt{Sarathi-Serve}~\cite{agrawal2024sarathi}) separate prefill from decode, while \texttt{MegaScale-Infer}~\cite{zhu2025megascaleinfer} and \texttt{DeepEP}~\cite{zhao2025deepep} disaggregate Attention from shared Expert-Parallel FFN nodes. Concurrently, Liu et al.~\cite{liu2026straggler} (\emph{Trigger the Straggler}) craft adversarial inputs to overload a single MoE GPU as a Denial-of-Service attack. \SM{} addresses the dual confidentiality problem: using stealthy tile-primed canary probes to deconvolve co-scheduled \emph{victim} expert activations over standard HTTP streams, paired with formal $(\epsilon, \delta)$-DP mitigation~\cite{dwork2014algorithmic,bun2016zcdp,cuff2016dpmi,canonne2020discretegaussian,durfee2019topkdp}.
+
+% ============================================================================
+\section{Discussion and Limitations}\label{sec:discussion}
+% ============================================================================
+
+\emph{Hardware Scope and Multi-Node RDMA Fabrics:} All empirical evaluations in this study ran locally on a single Apple M5 Pro workstation using Metal $\mathrm{FP16}$ kernel profiling, hardware-grounded AFD simulation with synthetic Gaussian jitter, and localhost TCP/HTTP-1.1 loopback sockets. Single-workstation simulation does not capture multi-node RDMA all-to-all tail congestion, PCIe/NVLink contention, or background multi-tenant traffic ($>8$ concurrent tenants) on production datacenter clusters. On NVIDIA H100/A100 clusters running \texttt{DeepEP}~\cite{zhao2025deepep} grouped \texttt{GEMM}s (\texttt{CUTLASS}/\texttt{Triton}), Tensor-Core wave quantization exhibits analogous discrete tile cliffs at $M_{\mathrm{tile}} \in \{64, 128\}$ ($\sim 15$--$45~\mu\mathrm{s}$ per wave)~\cite{tan2025gpugemmcliff}, while RoCEv2/InfiniBand switch jitter ($\sigma_{\mathrm{net}} \approx 5$--$25~\mu\mathrm{s}$) lies inside our $\sigma_{\mathrm{net}} \in \{10, 50, 200\}~\mu\mathrm{s}$ sweep. Multi-node RDMA cluster validation and token-level autoregressive reconstruction remain important directions for future work.
+
+\emph{Adaptive Probing Detection vs.\ Intrinsic Defense:} Cloud providers could deploy rate-limiting heuristics against repeated single-token prompts ($[v, \dots, v]$). However, an adaptive attacker can replace repeated single tokens with natural-looking multi-token paraphrases screened via~\eqref{eq:d_optimal} to achieve comparable expert concentration without syntactic repetition. Because \OD{} enforces query-level $(\epsilon, \delta)$-DP indistinguishability directly at the per-tenant expert dispatch layer regardless of canary syntax, its Theorem~\ref{thm:dp_bound} mutual information guarantee holds unconditionally against arbitrary adaptive canary constructions.
+
+% ============================================================================
+\section{Conclusion}\label{sec:conclusion}
+% ============================================================================
+
+Disaggregating Attention frontends from shared Expert-Parallel FFN pools does not isolate co-scheduled tenants from remote timing inference. By priming public MoE experts right below discrete GPU matrix-multiply tile cliffs ($N_{\mathrm{can}} = M_{\mathrm{tile}} - \delta$) and deconvolving streamed HTTP Inter-Token Latencies, \SM{} reconstructs confidential victim prompt domains at up to $87.0\%$ accuracy and $20$-way MCP tool schemas at up to $90.0\%$ Top-1 ($94.4\%$ Top-3) accuracy under strict $0.00$-bit length-leakage controls in hardware-grounded AFD simulation, and $39.0\%$ ($1.95\times$ random floor) over live localhost HTTP/1.1 SSE streams. Our strictly per-tenant defense, \OD{}, schedules Shadow-Expert overflow and shifted two-sided Gaussian $(\epsilon, \delta)$-DP count blinding inside existing combine-barrier slack, collapsing attacker accuracy to the random-guess floor ($19\%$--$23\%$ on $5$ domains; $1.3\%$--$6.3\%$ on $20$ MCP tools, $0$ underflow slots) at $+2.3\%$--$+8.9\%$ serving $\mathrm{TPOT}$ overhead.
+
+\section*{CRediT authorship contribution statement}
+\textbf{Mohammed Kamran Syed:} Conceptualization, Methodology, Software, Formal analysis, Investigation, Validation, Writing -- original draft, Writing -- review \& editing.
+\textbf{Anudeep Rentala:} Methodology, Software, Validation, Writing -- review \& editing.
+\textbf{Somesh Rahul:} Software, Data curation, Visualization, Validation, Writing -- review \& editing.
+\textbf{Raghuram Malpe Pai:} Validation, Formal analysis, Writing -- review \& editing.
+\textbf{Krishna Suman Dara:} Methodology, Validation, Writing -- review \& editing.
+
+\section*{Declaration of competing interest}
+The authors declare that they have no known competing financial interests or personal relationships that could have appeared to influence the work reported in this paper.
+
+\section*{Funding}
+This research did not receive any specific grant from funding agencies in the public, commercial, or not-for-profit sectors. All evaluations used locally cached open-weight models on researcher hardware.
+
+\section*{Data availability}
+Source code for \SM{} and \OD{}, the two-tier \MLB{} suite ($260$ constant-length prompts and MCP tool calls plus the $8$-passage perplexity corpus), the localhost HTTP/1.1 SSE loopback harness, and raw hardware telemetry are archived at \url{https://github.com/batistado/sonarmoe} and \url{https://huggingface.co/datasets/batistado/MoELeak-Bench} under the Apache~2.0 license. Repositories are kept private during peer review (anonymous archive available to editors and reviewers upon request) and will be opened publicly upon publication.
+
+\bibliographystyle{elsarticle-num}
+\bibliography{references}
+
+\end{document}
