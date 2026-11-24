@@ -1,0 +1,21 @@
+Dear Editor-in-Chief,
+
+We are pleased to submit our original research manuscript titled "SonarMoE: Remote Prompt and Tool-Schema Reconstruction via Expert Contention in Disaggregated MoE Serving and Differentially Private Mitigation" for consideration for publication in Journal of Information Security and Applications.
+
+Production Mixture-of-Experts (MoE) serving deployments increasingly adopt Attention-FFN Disaggregation (AFD), isolating tenant Attention containers and Key-Value (KV) caches while sharing an Expert-Parallel feed-forward GPU pool. Although AFD neutralizes shared-KV prefix-cache attacks and host co-residency attacks, we demonstrate that an unprivileged remote HTTP streaming client can still infer co-scheduled victim prompt domains and Model Context Protocol (MCP) tool schemas solely from client-side Inter-Token Latency (ITL) timestamps.
+
+Our main contributions are:
+1. Tile-Boundary Side-Channel Capacity Theory (Theorem 1): We show that sizing public offline-synthesized canary micro-batches just below discrete GPU matrix-multiply tile cliffs (N_can = M_tile - delta) amplifies single-probe mutual information by 2.9x-17.8x over uncalibrated probing under network jitter.
+2. Blind Attack Evaluation under Zero Length Leakage (MoELeak-Bench): Using single-GPU Apple M5 Pro FP16 kernel profiling, hardware-grounded AFD simulation across synthetic jitter (10-200 us), and live localhost HTTP/1.1 SSE loopback verification on OLMoE-1B-7B and Granite-3.1-MoE with strict constant-length windows (B_vic = 64 tokens, 0.00 bits length leakage), SonarMoE achieves up to 87.0% five-domain accuracy and 90.0% Top-1 (94.4% Top-3) accuracy across 20 enterprise MCP tool schemas.
+3. Sound Per-Tenant Differentially Private Mitigation (OblivDispatch, Theorem 2): We design a strictly per-tenant three-stage dispatcher combining shadow-expert overflow inside cross-rank barrier slack with a shifted two-sided Gaussian mechanism, data-independent clipping [N_min, N_max], and split failure accounting (delta = delta_zCDP + delta_tail). Across all evaluated budgets and seeds, OblivDispatch achieves zero observed underflow slots, drives attacker accuracy to the random-guess floor, obeys our analytical rho-zCDP mutual information upper bound, and keeps serving TPOT overhead at +2.33% to +2.42% on Granite-3.1-MoE and +7.94% to +8.93% on OLMoE-1B-7B.
+
+We confirm that this manuscript is original, has not been published previously, and is not under consideration for publication elsewhere. All authors have approved the manuscript and agree with its submission to Journal of Information Security and Applications, and declare no competing financial interests. All source code, the MoELeak-Bench dataset, and raw hardware telemetry are publicly available under the Apache 2.0 license at https://github.com/batistado/sonarmoe and https://huggingface.co/datasets/batistado/MoELeak-Bench to support full reproducibility.
+
+Thank you for your time and consideration.
+
+Sincerely,
+Mohammed Kamran Syed (Corresponding Author)
+Independent Researcher, Mountain House, CA, USA
+E-mail: mohammedkamran.syed@ieee.org
+ORCID: 0009-0009-9058-5375
+On behalf of all co-authors: Anudeep Rentala, Somesh Rahul, Raghuram Malpe Pai, and Krishna Suman Dara

@@ -1,0 +1,5 @@
+- Remote HTTP timing leaks prompt domains and MCP tools in disaggregated MoE serving.
+- Tile-cliff canary priming amplifies timing echoes by 2.9x-17.8x under network jitter.
+- SonarMoE hits 87.0% 5-domain and 90.0% 20-MCP-tool accuracy at 0-bit length leak.
+- OblivDispatch adds per-tenant (eps,delta)-DP count blinding inside barrier slack.
+- Defense cuts attacker accuracy to random guessing at 2.3%-8.9% latency overhead.
