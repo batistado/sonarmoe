@@ -1,0 +1,21 @@
+Dear Editor-in-Chief,
+
+We are pleased to submit our original research manuscript titled "SonarMoE: Remote Prompt and Tool-Schema Reconstruction via Expert Contention in Disaggregated MoE Serving and Differentially Private Mitigation" for consideration for publication in The Journal of Supercomputing.
+
+Modern large-scale Mixture-of-Experts (MoE) inference systems increasingly adopt Attention-FFN Disaggregation (AFD) to decouple stateful Attention Key-Value (KV) caches from shared Expert-Parallel feed-forward GPU pools. While AFD eliminates cross-tenant KV cache sharing and host co-residency, we investigate a systems-level confidentiality vulnerability arising directly from GPU SIMD/Tensor-Core matrix-multiply tile quantization and cross-rank combine-barrier synchronization.
+
+Our main contributions are:
+1. Hardware Tile-Quantization Channel Analysis (Theorem 1): We profile real FP16 expert GEMM kernels on Apple M5 Pro GPUs across OLMoE-1B-7B (+27.71 us/expert step at N=128->129) and Granite-3.1-MoE (+4.29 us/expert) and prove that sizing offline-synthesized canary micro-batches just below the tile cliff (N_can = M_tile - 6 = 122) amplifies single-probe timing capacity by 2.9x-17.8x under additive network jitter.
+2. Constant-Length Multi-Model and Live SSE Evaluation (MoELeak-Bench): Under strict zero-length-leakage controls (B_vic = 64 tokens, 0.00 bits length leakage), SonarMoE achieves up to 87.0% five-domain prompt classification accuracy and 90.0% Top-1 (94.4% Top-3) accuracy across 20 Model Context Protocol (MCP) tool schemas in hardware-grounded AFD simulation, and 39.0% (1.95x random floor) over 12,928 live localhost HTTP/1.1 chunked SSE frames executing synchronized GPU expert kernels.
+3. Per-Tenant Straggler-Slack Differentially Private Scheduling (OblivDispatch, Theorem 2): We design a strictly per-tenant three-stage dispatcher that hides shadow-expert overflow and shifted two-sided Gaussian count blinding (with data-independent clipping [1, N_max] and split failure accounting delta = delta_zCDP + delta_tail) inside idle cross-rank combine-barrier slack. Across all evaluated budgets and seeds, OblivDispatch achieves zero observed underflow slots, strictly obeys our analytical rho-zCDP mutual information upper bound, and dominates both Pure Router Gumbel Noise (+13.9 to +630.3 PPL degradation while still leaking 45%-68% accuracy) and Uniform Worst-Case Padding (8.0x FFN compute vs. 2.4x for OblivDispatch, +2.2% to +8.9% TPOT overhead, and only +0.08 to +0.15 PPL shift across an expanded 24-passage benchmark).
+
+This manuscript aligns directly with The Journal of Supercomputing's focus on parallel architectures, GPU systems performance, distributed cloud AI workloads, and privacy-preserving systems engineering. We confirm that this work is original, has not been published previously, and is not under consideration elsewhere. All authors approve the submission and declare no competing interests. All source code, benchmarks, and hardware telemetry are publicly available under the Apache 2.0 license at https://github.com/batistado/sonarmoe and https://huggingface.co/datasets/batistado/MoELeak-Bench.
+
+Thank you for your time and consideration.
+
+Sincerely,
+Mohammed Kamran Syed (Corresponding Author)
+Independent Researcher, Mountain House, CA, USA
+E-mail: mohammedkamran.syed@ieee.org
+ORCID: 0009-0009-9058-5375
+On behalf of all co-authors: Anudeep Rentala, Somesh Rahul, Raghuram Malpe Pai, and Krishna Suman Dara
